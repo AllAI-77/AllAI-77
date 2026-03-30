@@ -1,0 +1,386 @@
+// Universal Assessment Pro — Prisma Schema
+// ATB Universalbank (Uzbekistan)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─── Enums ───────────────────────────────────────────────────────────────────
+
+enum Role {
+  SUPER_ADMIN
+  HR_MANAGER
+  BRANCH_MANAGER
+  CONTENT_CREATOR
+  EMPLOYEE
+}
+
+enum QuestionType {
+  MCQ
+  TRUE_FALSE
+  CASE_STUDY
+  FILL_BLANK
+}
+
+enum AttemptStatus {
+  IN_PROGRESS
+  COMPLETED
+  ABANDONED
+  EXPIRED
+}
+
+enum GeneratedQuestionStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum KnowledgeSourceType {
+  CBU_GUIDELINES
+  BANK_WEBSITE
+  MANUAL_UPLOAD
+}
+
+// ─── Auth (NextAuth v5 / Auth.js) ────────────────────────────────────────────
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ─── Organisation Structure ───────────────────────────────────────────────────
+
+model Department {
+  id        String   @id @default(cuid())
+  name      String
+  code      String   @unique
+  createdAt DateTime @default(now())
+  users     User[]
+}
+
+model Branch {
+  id          String   @id @default(cuid())
+  name        String
+  code        String   @unique
+  region      String
+  ipWhitelist String[] @default([])
+  createdAt   DateTime @default(now())
+  users       User[]
+}
+
+// ─── Users ────────────────────────────────────────────────────────────────────
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  emailVerified DateTime?
+  name          String?
+  avatar        String?
+  role          Role      @default(EMPLOYEE)
+  isActive      Boolean   @default(true)
+  passwordHash  String?
+  departmentId  String?
+  branchId      String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  department        Department?         @relation(fields: [departmentId], references: [id])
+  branch            Branch?             @relation(fields: [branchId], references: [id])
+  accounts          Account[]
+  sessions          Session[]
+  exams             Exam[]              @relation("ExamCreator")
+  attempts          ExamAttempt[]
+  certificates      Certificate[]
+  auditLogs         AuditLog[]
+  questionsCreated  Question[]          @relation("QuestionCreator")
+  questionVersions  QuestionVersion[]   @relation("QuestionVersionChanger")
+  generatedReviews  GeneratedQuestion[] @relation("GeneratedQuestionReviewer")
+
+  @@index([email])
+  @@index([role])
+  @@index([departmentId])
+  @@index([branchId])
+}
+
+// ─── Question Bank ────────────────────────────────────────────────────────────
+
+model Category {
+  id          String   @id @default(cuid())
+  name        String
+  slug        String   @unique
+  description String?
+  color       String   @default("#003DA5")
+  icon        String?
+  isActive    Boolean  @default(true)
+  parentId    String?
+  createdAt   DateTime @default(now())
+
+  parent         Category?      @relation("CategoryHierarchy", fields: [parentId], references: [id])
+  children       Category[]     @relation("CategoryHierarchy")
+  questions      Question[]
+  examCategories ExamCategory[]
+
+  @@index([slug])
+  @@index([parentId])
+}
+
+model Question {
+  id            String       @id @default(cuid())
+  title         String
+  body          String       @db.Text
+  type          QuestionType @default(MCQ)
+  difficulty    Int          @default(3)
+  categoryId    String
+  versionNumber Int          @default(1)
+  isActive      Boolean      @default(true)
+  explanation   String?      @db.Text
+  imageUrl      String?
+  metadata      Json?
+  createdById   String
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  category  Category          @relation(fields: [categoryId], references: [id])
+  createdBy User              @relation("QuestionCreator", fields: [createdById], references: [id])
+  options   QuestionOption[]
+  versions  QuestionVersion[]
+  responses Response[]
+
+  @@index([categoryId])
+  @@index([type])
+  @@index([difficulty])
+  @@index([isActive])
+  @@index([createdById])
+}
+
+model QuestionOption {
+  id         String  @id @default(cuid())
+  questionId String
+  text       String  @db.Text
+  isCorrect  Boolean @default(false)
+  orderIndex Int     @default(0)
+  imageUrl   String?
+
+  question  Question   @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  responses Response[]
+
+  @@index([questionId])
+}
+
+model QuestionVersion {
+  id            String   @id @default(cuid())
+  questionId    String
+  snapshot      Json
+  versionNumber Int
+  changeNote    String?
+  changedById   String
+  changedAt     DateTime @default(now())
+
+  question  Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  changedBy User     @relation("QuestionVersionChanger", fields: [changedById], references: [id])
+
+  @@index([questionId])
+}
+
+// ─── Exam Configuration ───────────────────────────────────────────────────────
+
+model Exam {
+  id                   String   @id @default(cuid())
+  title                String
+  description          String?  @db.Text
+  passingScore         Int      @default(70)
+  timeLimit            Int?
+  timeLimitPerQuestion Int?
+  randomize            Boolean  @default(true)
+  allowReview          Boolean  @default(true)
+  showAnswers          Boolean  @default(false)
+  ipWhitelist          String[] @default([])
+  isActive             Boolean  @default(true)
+  isAdaptive           Boolean  @default(false)
+  createdById          String
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  createdBy      User           @relation("ExamCreator", fields: [createdById], references: [id])
+  examCategories ExamCategory[]
+  attempts       ExamAttempt[]
+
+  @@index([isActive])
+  @@index([createdById])
+}
+
+model ExamCategory {
+  id            String @id @default(cuid())
+  examId        String
+  categoryId    String
+  questionCount Int    @default(5)
+
+  exam     Exam     @relation(fields: [examId], references: [id], onDelete: Cascade)
+  category Category @relation(fields: [categoryId], references: [id])
+
+  @@unique([examId, categoryId])
+  @@index([examId])
+  @@index([categoryId])
+}
+
+// ─── Exam Attempts & Responses ────────────────────────────────────────────────
+
+model ExamAttempt {
+  id             String        @id @default(cuid())
+  examId         String
+  userId         String
+  startedAt      DateTime      @default(now())
+  completedAt    DateTime?
+  score          Float?
+  passed         Boolean?
+  ipAddress      String?
+  userAgent      String?
+  tabSwitchCount Int           @default(0)
+  status         AttemptStatus @default(IN_PROGRESS)
+  resumeState    Json?
+  updatedAt      DateTime      @updatedAt
+
+  exam        Exam          @relation(fields: [examId], references: [id])
+  user        User          @relation(fields: [userId], references: [id])
+  responses   Response[]
+  certificate Certificate?
+
+  @@index([examId])
+  @@index([userId])
+  @@index([status])
+  @@index([startedAt])
+}
+
+model Response {
+  id               String   @id @default(cuid())
+  attemptId        String
+  questionId       String
+  selectedOptionId String?
+  textAnswer       String?  @db.Text
+  isCorrect        Boolean?
+  timeSpent        Int?
+  flaggedForReview Boolean  @default(false)
+  answeredAt       DateTime @default(now())
+
+  attempt        ExamAttempt     @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  question       Question        @relation(fields: [questionId], references: [id])
+  selectedOption QuestionOption? @relation(fields: [selectedOptionId], references: [id])
+
+  @@unique([attemptId, questionId])
+  @@index([attemptId])
+  @@index([questionId])
+}
+
+// ─── Certificates ─────────────────────────────────────────────────────────────
+
+model Certificate {
+  id               String    @id @default(cuid())
+  attemptId        String    @unique
+  userId           String
+  issuedAt         DateTime  @default(now())
+  verificationCode String    @unique @default(cuid())
+  qrCodeData       String?   @db.Text
+  pdfUrl           String?
+  expiresAt        DateTime?
+
+  attempt ExamAttempt @relation(fields: [attemptId], references: [id])
+  user    User        @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([verificationCode])
+}
+
+// ─── Audit Trail ─────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId     String?
+  action     String
+  entityType String
+  entityId   String?
+  oldValues  Json?
+  newValues  Json?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([action])
+  @@index([entityType])
+  @@index([createdAt])
+}
+
+// ─── AI Knowledge Base & Question Generation ─────────────────────────────────
+
+model KnowledgeSource {
+  id            String              @id @default(cuid())
+  url           String
+  title         String?
+  sourceType    KnowledgeSourceType @default(BANK_WEBSITE)
+  lastScrapedAt DateTime?
+  isActive      Boolean             @default(true)
+  createdAt     DateTime            @default(now())
+
+  generatedQuestions GeneratedQuestion[]
+
+  @@index([sourceType])
+  @@index([isActive])
+}
+
+model GeneratedQuestion {
+  id             String                  @id @default(cuid())
+  sourceId       String?
+  rawText        String                  @db.Text
+  parsedQuestion Json?
+  status         GeneratedQuestionStatus @default(PENDING)
+  reviewedById   String?
+  reviewNote     String?
+  createdAt      DateTime                @default(now())
+  reviewedAt     DateTime?
+
+  source     KnowledgeSource? @relation(fields: [sourceId], references: [id])
+  reviewedBy User?            @relation("GeneratedQuestionReviewer", fields: [reviewedById], references: [id])
+
+  @@index([status])
+  @@index([sourceId])
+}
