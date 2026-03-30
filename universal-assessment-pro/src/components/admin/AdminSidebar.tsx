@@ -12,6 +12,7 @@ import {
   ChevronRight,
   GraduationCap,
   LogOut,
+  Sparkles,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { logOut } from "@/lib/actions/auth.actions";
@@ -28,6 +29,7 @@ const NAV_ITEMS: NavItem[] = [
   { label: "Dashboard",  href: "/admin/dashboard",  icon: LayoutDashboard },
   { label: "Questions",  href: "/admin/questions",  icon: BookOpen },
   { label: "Exams",      href: "/admin/exams",      icon: ClipboardList },
+  { label: "AI Studio",  href: "/admin/ai-studio",  icon: Sparkles, roles: ["SUPER_ADMIN", "HR_MANAGER", "CONTENT_CREATOR"] as Role[] },
   { label: "Users",      href: "/admin/users",      icon: Users, roles: ["SUPER_ADMIN", "HR_MANAGER"] },
 ];
 
