@@ -4,7 +4,7 @@ import Credentials from "next-auth/providers/credentials";
 import Email from "next-auth/providers/nodemailer";
 import { db } from "@/lib/db";
 import bcrypt from "bcryptjs";
-import { z } from "zod";
+import { loginSchema } from "@/lib/validations/auth";
 import type { Role } from "@prisma/client";
 
 // ─── Type augmentation for next-auth v5 ──────────────────────────────────────
@@ -27,10 +27,6 @@ declare module "next-auth" {
   }
 }
 
-const credentialsSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(6),
-});
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -38,8 +34,8 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   session: { strategy: "jwt" },
   pages: {
     signIn: "/login",
-    error: "/login",
-    verifyRequest: "/login?verify=1",
+    error: "/error",
+    verifyRequest: "/magic-link",
   },
   providers: [
     Email({
@@ -60,7 +56,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         password: { label: "Password", type: "password" },
       },
       async authorize(credentials) {
-        const parsed = credentialsSchema.safeParse(credentials);
+        const parsed = loginSchema.safeParse(credentials);
         if (!parsed.success) return null;
 
         const { email, password } = parsed.data;
