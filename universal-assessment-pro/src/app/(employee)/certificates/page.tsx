@@ -4,7 +4,7 @@ import { redirect } from "next/navigation";
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { format } from "date-fns";
-import { Award, ExternalLink } from "lucide-react";
+import { Award, ExternalLink, Download } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 
 export const metadata: Metadata = { title: "My Certificates" };
@@ -70,12 +70,21 @@ export default async function CertificatesPage() {
                 <span className="text-[10px] text-gray-400">
                   Issued {format(cert.issuedAt, "MMM d, yyyy")}
                 </span>
-                <Link
-                  href={`/results/${cert.attemptId}`}
-                  className="flex items-center gap-1 text-[10px] text-blue-600 hover:underline"
-                >
-                  View results <ExternalLink className="h-2.5 w-2.5" />
-                </Link>
+                <div className="flex items-center gap-2">
+                  <Link
+                    href={`/results/${cert.attemptId}`}
+                    className="flex items-center gap-1 text-[10px] text-blue-600 hover:underline"
+                  >
+                    View <ExternalLink className="h-2.5 w-2.5" />
+                  </Link>
+                  <a
+                    href={`/api/certificates/${cert.attemptId}/pdf`}
+                    className="flex items-center gap-1 text-[10px] text-amber-700 hover:underline"
+                    download
+                  >
+                    PDF <Download className="h-2.5 w-2.5" />
+                  </a>
+                </div>
               </div>
             </div>
           ))}

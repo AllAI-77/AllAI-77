@@ -245,6 +245,107 @@ async function main() {
   });
   console.log(`✅ Created sample question: ${sampleQuestion.title}`);
 
+  // ─── Additional questions ──────────────────────────────────────────────────
+
+  const extraQuestions: Array<{
+    id: string; title: string; body: string;
+    type: "MCQ" | "TRUE_FALSE"; difficulty: number; catIndex: number;
+    explanation: string;
+    options: Array<{ text: string; isCorrect: boolean; orderIndex: number }>;
+  }> = [
+    { id: "q-sample-002", title: "KYC definition",
+      body: "KYC (Know Your Customer) is a mandatory regulatory requirement for banks when onboarding new clients.",
+      type: "TRUE_FALSE", difficulty: 1, catIndex: 3,
+      explanation: "KYC is indeed mandatory under CBU and global AML regulations.",
+      options: [{ text: "True", isCorrect: true, orderIndex: 0 }, { text: "False", isCorrect: false, orderIndex: 1 }] },
+    { id: "q-sample-003", title: "Suspicious transaction reporting",
+      body: "Which department is primarily responsible for filing Suspicious Activity Reports (SARs)?",
+      type: "MCQ", difficulty: 3, catIndex: 3,
+      explanation: "The Compliance/AML department monitors and reports suspicious activities.",
+      options: [
+        { text: "IT Department", isCorrect: false, orderIndex: 0 },
+        { text: "Compliance/AML Team", isCorrect: true, orderIndex: 1 },
+        { text: "Customer Service Team", isCorrect: false, orderIndex: 2 },
+        { text: "Marketing Department", isCorrect: false, orderIndex: 3 },
+      ] },
+    { id: "q-sample-004", title: "IFRS 9 impairment model",
+      body: "Under IFRS 9, loans are classified based on which model?",
+      type: "MCQ", difficulty: 4, catIndex: 2,
+      explanation: "IFRS 9 uses an Expected Credit Loss (ECL) model for impairment.",
+      options: [
+        { text: "Incurred Loss Model", isCorrect: false, orderIndex: 0 },
+        { text: "Expected Credit Loss Model", isCorrect: true, orderIndex: 1 },
+        { text: "Historical Cost Model", isCorrect: false, orderIndex: 2 },
+        { text: "Fair Value Model", isCorrect: false, orderIndex: 3 },
+      ] },
+    { id: "q-sample-005", title: "Phishing attack prevention",
+      body: "Employees should never click links in unsolicited emails claiming to be from the IT department.",
+      type: "TRUE_FALSE", difficulty: 2, catIndex: 4,
+      explanation: "Phishing emails are a common attack vector. Always verify through official channels.",
+      options: [{ text: "True", isCorrect: true, orderIndex: 0 }, { text: "False", isCorrect: false, orderIndex: 1 }] },
+    { id: "q-sample-006", title: "Overdraft facility",
+      body: "An overdraft allows a customer to withdraw more than their available balance up to an agreed limit.",
+      type: "TRUE_FALSE", difficulty: 1, catIndex: 0,
+      explanation: "An overdraft is a credit facility allowing spending beyond the account balance.",
+      options: [{ text: "True", isCorrect: true, orderIndex: 0 }, { text: "False", isCorrect: false, orderIndex: 1 }] },
+    { id: "q-sample-007", title: "SWIFT code purpose",
+      body: "What is the primary purpose of a SWIFT code (BIC)?",
+      type: "MCQ", difficulty: 2, catIndex: 1,
+      explanation: "SWIFT codes uniquely identify banks in international wire transfers.",
+      options: [
+        { text: "To identify individual customer accounts", isCorrect: false, orderIndex: 0 },
+        { text: "To uniquely identify banks in international transfers", isCorrect: true, orderIndex: 1 },
+        { text: "To encrypt transaction data", isCorrect: false, orderIndex: 2 },
+        { text: "To determine transaction fees", isCorrect: false, orderIndex: 3 },
+      ] },
+    { id: "q-sample-008", title: "Nostro account definition",
+      body: "A nostro account is our bank's account held at a foreign correspondent bank.",
+      type: "TRUE_FALSE", difficulty: 3, catIndex: 1,
+      explanation: "Nostro (Italian: 'ours') refers to our account at a foreign bank.",
+      options: [{ text: "True", isCorrect: true, orderIndex: 0 }, { text: "False", isCorrect: false, orderIndex: 1 }] },
+    { id: "q-sample-009", title: "Two-factor authentication",
+      body: "Which combination represents valid two-factor authentication (2FA)?",
+      type: "MCQ", difficulty: 2, catIndex: 4,
+      explanation: "2FA requires two different factors: something you know + something you have.",
+      options: [
+        { text: "Password + security question", isCorrect: false, orderIndex: 0 },
+        { text: "Password + OTP via mobile app", isCorrect: true, orderIndex: 1 },
+        { text: "Username + email address", isCorrect: false, orderIndex: 2 },
+        { text: "Two different passwords", isCorrect: false, orderIndex: 3 },
+      ] },
+    { id: "q-sample-010", title: "Collateral in lending",
+      body: "Collateral in a loan agreement primarily serves to:",
+      type: "MCQ", difficulty: 2, catIndex: 0,
+      explanation: "Collateral reduces the lender's risk by providing an asset that can be seized on default.",
+      options: [
+        { text: "Increase the loan interest rate", isCorrect: false, orderIndex: 0 },
+        { text: "Reduce the lender's risk by securing the loan", isCorrect: true, orderIndex: 1 },
+        { text: "Guarantee faster loan approval", isCorrect: false, orderIndex: 2 },
+        { text: "Eliminate the need for a credit check", isCorrect: false, orderIndex: 3 },
+      ] },
+    { id: "q-sample-011", title: "Amortisation schedule",
+      body: "In an amortising loan, early repayments consist mainly of interest rather than principal.",
+      type: "TRUE_FALSE", difficulty: 3, catIndex: 2,
+      explanation: "Early amortising payments are weighted toward interest; principal grows over time.",
+      options: [{ text: "True", isCorrect: true, orderIndex: 0 }, { text: "False", isCorrect: false, orderIndex: 1 }] },
+  ];
+
+  let extraCount = 0;
+  for (const q of extraQuestions) {
+    const exists = await prisma.question.findUnique({ where: { id: q.id }, select: { id: true } });
+    if (exists) continue;
+    await prisma.question.create({
+      data: {
+        id: q.id, title: q.title, body: q.body, type: q.type,
+        difficulty: q.difficulty, categoryId: categories[q.catIndex].id,
+        explanation: q.explanation, isActive: true, createdById: adminUser.id,
+        options: { create: q.options },
+      },
+    });
+    extraCount++;
+  }
+  if (extraCount > 0) console.log(`✅ Created ${extraCount} additional questions`);
+
   // ─── Sample Exam ───────────────────────────────────────────────────────────
   await prisma.exam.upsert({
     where: { id: "exam-sample-001" },

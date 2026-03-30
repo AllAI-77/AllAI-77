@@ -5,6 +5,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { motion } from "framer-motion";
 import {
   Plus, Search, Pencil, UserCheck, UserX, KeyRound, Users,
+  Upload, Download,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -27,6 +28,7 @@ import {
   listUsers, setUserActive, resetUserPassword,
   createUser, updateUser, type SafeUser,
 } from "@/lib/actions/user.actions";
+import { ImportUsersDialog } from "@/components/admin/users/ImportUsersDialog";
 import { useForm, Controller } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -202,6 +204,7 @@ export default function UsersPage() {
   const [dialogOpen,  setDialogOpen]  = useState(false);
   const [editing,     setEditing]     = useState<SafeUser | null>(null);
   const [resetUserId, setResetUserId] = useState<string | null>(null);
+  const [importOpen,  setImportOpen]  = useState(false);
 
   const handleSearch = (v: string) => {
     setSearch(v);
@@ -240,10 +243,30 @@ export default function UsersPage() {
           <h2 className="text-xl font-bold text-gray-900">Users</h2>
           <p className="text-sm text-gray-500">{total} user{total !== 1 ? "s" : ""}</p>
         </div>
-        <Button className="gap-2" style={{ backgroundColor: "var(--brand-blue)" }}
-          onClick={() => { setEditing(null); setDialogOpen(true); }}>
-          <Plus className="h-4 w-4" /> New User
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1.5"
+            onClick={() => window.open("/api/export/attempts", "_blank")}
+          >
+            <Download className="h-3.5 w-3.5" />
+            Export Results
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1.5"
+            onClick={() => setImportOpen(true)}
+          >
+            <Upload className="h-3.5 w-3.5" />
+            Import
+          </Button>
+          <Button className="gap-2" style={{ backgroundColor: "var(--brand-blue)" }}
+            onClick={() => { setEditing(null); setDialogOpen(true); }}>
+            <Plus className="h-4 w-4" /> New User
+          </Button>
+        </div>
       </div>
 
       {/* Filters */}
@@ -373,6 +396,10 @@ export default function UsersPage() {
         onSuccess={() => { qc.invalidateQueries({ queryKey: ["users"] }); setDialogOpen(false); setEditing(null); }}
       />
       <ResetPasswordDialog userId={resetUserId} onClose={() => setResetUserId(null)} />
+      <ImportUsersDialog
+        open={importOpen}
+        onOpenChange={setImportOpen}
+      />
     </div>
   );
 }

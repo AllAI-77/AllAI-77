@@ -12,6 +12,7 @@ import {
   generateQRData,
 } from "@/lib/exam-engine";
 import { saveResumeState, getResumeState, clearResumeState } from "@/lib/redis";
+import { sendExamResultEmail, sendCertificateEmail } from "@/lib/email";
 import { headers } from "next/headers";
 import type { ApiResponse, ExamSession, SubmitAttemptPayload, AttemptWithDetails } from "@/types";
 
@@ -281,6 +282,38 @@ export async function submitAttempt(
 
     // Cleanup Redis state
     await clearResumeState(attemptId);
+
+    // Fire-and-forget emails (non-blocking)
+    const user = await db.user.findUnique({
+      where:  { id: authSession.user.id },
+      select: { name: true, email: true },
+    });
+    if (user) {
+      const examTitle = attempt.exam?.id
+        ? (await db.exam.findUnique({ where: { id: attempt.examId }, select: { title: true } }))?.title ?? "Exam"
+        : "Exam";
+
+      sendExamResultEmail({
+        to:          user.email,
+        name:        user.name ?? user.email,
+        examTitle,
+        score,
+        passed,
+        passingScore: attempt.exam.passingScore,
+        attemptId,
+      }).catch(() => {});
+
+      if (certificate) {
+        sendCertificateEmail({
+          to:               user.email,
+          name:             user.name ?? user.email,
+          examTitle,
+          score,
+          verificationCode: certificate.verificationCode,
+          attemptId,
+        }).catch(() => {});
+      }
+    }
 
     await audit({
       userId:     authSession.user.id,
