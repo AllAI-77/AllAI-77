@@ -2,7 +2,7 @@
 
 import { db } from "@/lib/db";
 import { Prisma } from "@prisma/client";
-import { requireAuth } from "@/lib/auth";
+import { requireAuth, requireRole } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 import {
   selectQuestionsForExam,
@@ -464,6 +464,77 @@ export async function getMyAttempts(): Promise<
     return { success: true, data: attempts };
   } catch (err) {
     return handleError("getMyAttempts", err);
+  }
+}
+
+// ─── Admin: list all attempts ─────────────────────────────────────────────────
+
+export interface AdminAttemptRow {
+  id:          string;
+  status:      string;
+  score:       number | null;
+  passed:      boolean | null;
+  startedAt:   Date;
+  completedAt: Date | null;
+  user:        { id: string; name: string | null; email: string };
+  exam:        { id: string; title: string; passingScore: number };
+}
+
+export interface ListAdminAttemptsParams {
+  page?:    number;
+  limit?:   number;
+  userId?:  string;
+  examId?:  string;
+  from?:    string; // ISO date
+  to?:      string; // ISO date
+  passed?:  boolean;
+}
+
+export async function listAdminAttempts(
+  params: ListAdminAttemptsParams = {}
+): Promise<ApiResponse<{ rows: AdminAttemptRow[]; total: number }>> {
+  try {
+    await requireRole("SUPER_ADMIN", "HR_MANAGER");
+
+    const { page = 1, limit = 25, userId, examId, from, to, passed } = params;
+
+    const where: Prisma.ExamAttemptWhereInput = {
+      ...(userId ? { userId }     : {}),
+      ...(examId ? { examId }     : {}),
+      ...(typeof passed === "boolean" ? { passed } : {}),
+      ...(from || to
+        ? {
+            startedAt: {
+              ...(from ? { gte: new Date(from) } : {}),
+              ...(to   ? { lte: new Date(to)   } : {}),
+            },
+          }
+        : {}),
+    };
+
+    const [rows, total] = await Promise.all([
+      db.examAttempt.findMany({
+        where,
+        skip:    (page - 1) * limit,
+        take:    limit,
+        orderBy: { startedAt: "desc" },
+        select: {
+          id:          true,
+          status:      true,
+          score:       true,
+          passed:      true,
+          startedAt:   true,
+          completedAt: true,
+          user:        { select: { id: true, name: true, email: true } },
+          exam:        { select: { id: true, title: true, passingScore: true } },
+        },
+      }),
+      db.examAttempt.count({ where }),
+    ]);
+
+    return { success: true, data: { rows, total } };
+  } catch (err) {
+    return handleError("listAdminAttempts", err);
   }
 }
 

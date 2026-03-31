@@ -21,6 +21,8 @@ const TITLE_MAP: Record<string, string> = {
   "/admin/exams":      "Exam Management",
   "/admin/users":      "User Management",
   "/admin/ai-studio":  "AI Studio",
+  "/admin/categories": "Categories",
+  "/admin/reports":    "Reports",
 };
 
 const ROLE_LABELS: Record<string, string> = {

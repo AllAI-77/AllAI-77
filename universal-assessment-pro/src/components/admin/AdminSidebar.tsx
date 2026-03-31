@@ -13,6 +13,8 @@ import {
   GraduationCap,
   LogOut,
   Sparkles,
+  Tag,
+  BarChart2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { logOut } from "@/lib/actions/auth.actions";
@@ -29,8 +31,10 @@ const NAV_ITEMS: NavItem[] = [
   { label: "Dashboard",  href: "/admin/dashboard",  icon: LayoutDashboard },
   { label: "Questions",  href: "/admin/questions",  icon: BookOpen },
   { label: "Exams",      href: "/admin/exams",      icon: ClipboardList },
-  { label: "AI Studio",  href: "/admin/ai-studio",  icon: Sparkles, roles: ["SUPER_ADMIN", "HR_MANAGER", "CONTENT_CREATOR"] as Role[] },
-  { label: "Users",      href: "/admin/users",      icon: Users, roles: ["SUPER_ADMIN", "HR_MANAGER"] },
+  { label: "AI Studio",  href: "/admin/ai-studio",  icon: Sparkles,   roles: ["SUPER_ADMIN", "HR_MANAGER", "CONTENT_CREATOR"] as Role[] },
+  { label: "Categories", href: "/admin/categories", icon: Tag,        roles: ["SUPER_ADMIN", "HR_MANAGER", "CONTENT_CREATOR"] as Role[] },
+  { label: "Reports",    href: "/admin/reports",    icon: BarChart2,  roles: ["SUPER_ADMIN", "HR_MANAGER"] as Role[] },
+  { label: "Users",      href: "/admin/users",      icon: Users,      roles: ["SUPER_ADMIN", "HR_MANAGER"] as Role[] },
 ];
 
 interface AdminSidebarProps {
