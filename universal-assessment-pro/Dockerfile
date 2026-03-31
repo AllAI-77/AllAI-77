@@ -40,9 +40,10 @@ COPY --from=builder /app/package.json  ./package.json
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static     ./.next/static
 
-# Install only prod deps needed for prisma migrate + seed at startup
+# Copy Prisma runtime + CLI (needed for migrate deploy at startup)
 COPY --from=deps /app/node_modules/.prisma     ./node_modules/.prisma
 COPY --from=deps /app/node_modules/@prisma     ./node_modules/@prisma
+COPY --from=deps /app/node_modules/prisma      ./node_modules/prisma
 
 USER nextjs
 
@@ -50,5 +51,5 @@ EXPOSE 3000
 ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 
-# Run migrations then start the server
-CMD ["sh", "-c", "npx prisma migrate deploy && node server.js"]
+# Run migrations then start the server (use node directly — no npx/network needed)
+CMD ["sh", "-c", "node node_modules/prisma/build/index.js migrate deploy && node server.js"]
