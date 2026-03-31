@@ -59,12 +59,15 @@ export default async function CertificatesPage() {
                 </div>
               </div>
 
-              <div className="rounded-lg bg-white/70 px-3 py-2 border border-amber-100">
-                <p className="text-[10px] text-gray-400">Verification Code</p>
+              <Link
+                href={`/verify/${cert.verificationCode}`}
+                className="rounded-lg bg-white/70 px-3 py-2 border border-amber-100 block hover:bg-white/90 transition"
+              >
+                <p className="text-[10px] text-gray-400">Verification Code ↗</p>
                 <p className="text-xs font-mono font-semibold text-gray-700 tracking-wide">
                   {cert.verificationCode}
                 </p>
-              </div>
+              </Link>
 
               <div className="flex items-center justify-between">
                 <span className="text-[10px] text-gray-400">

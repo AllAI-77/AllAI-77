@@ -5,6 +5,9 @@ const PUBLIC_ROUTES = [
   "/login",
   "/api/auth",
   "/api/certificates/verify",
+  "/verify",
+  "/magic-link",
+  "/error",
 ];
 
 const ADMIN_ROLES = [

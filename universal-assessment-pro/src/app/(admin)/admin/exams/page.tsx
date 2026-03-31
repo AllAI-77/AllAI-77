@@ -3,7 +3,8 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { motion } from "framer-motion";
-import { Plus, Search, Pencil, ToggleLeft, ToggleRight, ClipboardList } from "lucide-react";
+import { Plus, Search, Pencil, ToggleLeft, ToggleRight, ClipboardList, BarChart2 } from "lucide-react";
+import Link from "next/link";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -176,6 +177,13 @@ export default function ExamsPage() {
                       </TableCell>
                       <TableCell>
                         <div className="flex items-center gap-1">
+                          <Link
+                            href={`/admin/exams/${exam.id}`}
+                            className="inline-flex h-7 w-7 items-center justify-center rounded-md text-gray-400 hover:bg-gray-100 hover:text-[#003DA5] transition-colors"
+                            title="View stats"
+                          >
+                            <BarChart2 className="h-3.5 w-3.5" />
+                          </Link>
                           <Button
                             variant="ghost" size="icon"
                             className="h-7 w-7 text-gray-400 hover:text-blue-600"

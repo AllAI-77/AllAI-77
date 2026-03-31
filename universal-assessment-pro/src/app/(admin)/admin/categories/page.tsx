@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { motion } from "framer-motion";
 import { Plus, Pencil, Trash2, Tag, Hash, Loader2, BookOpen } from "lucide-react";
@@ -46,7 +46,7 @@ function CategoryDialog({
   const qc     = useQueryClient();
   const isEdit = !!editing;
 
-  const { register, handleSubmit, reset, setValue, watch, formState: { errors } } =
+  const { register, handleSubmit, reset, setValue, formState: { errors } } =
     useForm<FormValues>({
       resolver: zodResolver(schema),
       defaultValues: {
@@ -54,16 +54,15 @@ function CategoryDialog({
       },
     });
 
-  const nameValue = watch("name");
-
   // Auto-fill slug from name when creating
   const handleNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!isEdit) setValue("slug", slugify(e.target.value));
   };
 
-  // Reset when dialog opens
-  useState(() => {
-    if (open && editing) {
+  // Reset form when dialog opens / editing changes
+  useEffect(() => {
+    if (!open) return;
+    if (editing) {
       reset({
         name:        editing.name,
         slug:        editing.slug,
@@ -71,10 +70,10 @@ function CategoryDialog({
         color:       editing.color,
         icon:        editing.icon ?? "",
       });
-    } else if (open && !editing) {
+    } else {
       reset({ name: "", slug: "", description: "", color: "#003DA5", icon: "" });
     }
-  });
+  }, [open, editing, reset]);
 
   const mutation = useMutation({
     mutationFn: (data: FormValues) =>
