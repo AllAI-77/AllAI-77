@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, ClipboardList, Award, LogOut, Menu, X } from "lucide-react";
+import { LayoutDashboard, ClipboardList, Award, LogOut, Menu, X, UserCircle } from "lucide-react";
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "@/components/ui/button";
@@ -11,9 +11,10 @@ import { logOut } from "@/lib/actions/auth.actions";
 import type { Role } from "@prisma/client";
 
 const NAV = [
-  { href: "/dashboard",      label: "My Dashboard", icon: LayoutDashboard },
-  { href: "/exams",          label: "Browse Exams",  icon: ClipboardList },
-  { href: "/certificates",   label: "Certificates",  icon: Award },
+  { href: "/dashboard",    label: "My Dashboard", icon: LayoutDashboard },
+  { href: "/exams",        label: "Browse Exams",  icon: ClipboardList },
+  { href: "/certificates", label: "Certificates",  icon: Award },
+  { href: "/profile",      label: "My Profile",    icon: UserCircle },
 ];
 
 const ROLE_LABELS: Record<string, string> = {

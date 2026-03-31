@@ -15,6 +15,8 @@ import {
   Sparkles,
   Tag,
   BarChart2,
+  TrendingUp,
+  Building2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { logOut } from "@/lib/actions/auth.actions";
@@ -28,13 +30,15 @@ interface NavItem {
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { label: "Dashboard",  href: "/admin/dashboard",  icon: LayoutDashboard },
-  { label: "Questions",  href: "/admin/questions",  icon: BookOpen },
-  { label: "Exams",      href: "/admin/exams",      icon: ClipboardList },
-  { label: "AI Studio",  href: "/admin/ai-studio",  icon: Sparkles,   roles: ["SUPER_ADMIN", "HR_MANAGER", "CONTENT_CREATOR"] as Role[] },
-  { label: "Categories", href: "/admin/categories", icon: Tag,        roles: ["SUPER_ADMIN", "HR_MANAGER", "CONTENT_CREATOR"] as Role[] },
-  { label: "Reports",    href: "/admin/reports",    icon: BarChart2,  roles: ["SUPER_ADMIN", "HR_MANAGER"] as Role[] },
-  { label: "Users",      href: "/admin/users",      icon: Users,      roles: ["SUPER_ADMIN", "HR_MANAGER"] as Role[] },
+  { label: "Dashboard",    href: "/admin/dashboard",    icon: LayoutDashboard },
+  { label: "Questions",    href: "/admin/questions",    icon: BookOpen },
+  { label: "Exams",        href: "/admin/exams",        icon: ClipboardList },
+  { label: "AI Studio",    href: "/admin/ai-studio",    icon: Sparkles,   roles: ["SUPER_ADMIN", "HR_MANAGER", "CONTENT_CREATOR"] as Role[] },
+  { label: "Categories",   href: "/admin/categories",   icon: Tag,        roles: ["SUPER_ADMIN", "HR_MANAGER", "CONTENT_CREATOR"] as Role[] },
+  { label: "Analytics",    href: "/admin/analytics",    icon: TrendingUp, roles: ["SUPER_ADMIN", "HR_MANAGER", "BRANCH_MANAGER"] as Role[] },
+  { label: "Reports",      href: "/admin/reports",      icon: BarChart2,  roles: ["SUPER_ADMIN", "HR_MANAGER"] as Role[] },
+  { label: "Organization", href: "/admin/organization", icon: Building2,  roles: ["SUPER_ADMIN", "HR_MANAGER"] as Role[] },
+  { label: "Users",        href: "/admin/users",        icon: Users,      roles: ["SUPER_ADMIN", "HR_MANAGER"] as Role[] },
 ];
 
 interface AdminSidebarProps {
