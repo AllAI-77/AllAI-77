@@ -5,7 +5,6 @@ import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { BookOpen, Clock, CheckCircle2, Users, BarChart2, Tag } from "lucide-react";
 import { buttonVariants } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
 export const metadata: Metadata = { title: "Exam Details" };

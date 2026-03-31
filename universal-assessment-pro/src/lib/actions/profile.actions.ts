@@ -4,6 +4,7 @@ import { db } from "@/lib/db";
 import { requireAuth } from "@/lib/auth";
 import { z } from "zod";
 import bcrypt from "bcryptjs";
+import { revalidatePath } from "next/cache";
 import type { ApiResponse } from "@/types";
 
 // ─── Schemas ──────────────────────────────────────────────────────────────────
@@ -35,6 +36,7 @@ export async function updateMyName(
       select: { name: true },
     });
 
+    revalidatePath("/", "layout");
     return { success: true, data: { name: updated.name ?? "" } };
   } catch (err) {
     console.error("[updateMyName]", err);

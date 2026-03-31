@@ -5,7 +5,6 @@ import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { format } from "date-fns";
 import { Award, ExternalLink, Download } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
 
 export const metadata: Metadata = { title: "My Certificates" };
 

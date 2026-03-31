@@ -6,11 +6,10 @@ import { getAttemptResult } from "@/lib/actions/attempt.actions";
 import { format } from "date-fns";
 import {
   CheckCircle2, XCircle, Award, Clock, RotateCcw,
-  LayoutDashboard, ChevronDown, ChevronUp,
+  LayoutDashboard,
 } from "lucide-react";
 import { buttonVariants } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { ResultResponseList } from "@/components/employee/ResultResponseList";
 

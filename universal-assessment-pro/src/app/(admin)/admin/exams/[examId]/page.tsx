@@ -4,13 +4,12 @@ import { redirect, notFound } from "next/navigation";
 import { format } from "date-fns";
 import {
   ArrowLeft, ClipboardList, Users, CheckCircle2, XCircle,
-  TrendingUp, Clock, BookOpen, Award,
+  TrendingUp, Award,
 } from "lucide-react";
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { Badge } from "@/components/ui/badge";
 import { buttonVariants } from "@/components/ui/button";
-import { Progress } from "@/components/ui/progress";
 import { cn } from "@/lib/utils";
 
 export const metadata: Metadata = { title: "Exam Details" };

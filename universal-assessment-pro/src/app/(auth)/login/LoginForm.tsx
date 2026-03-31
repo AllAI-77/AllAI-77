@@ -152,7 +152,6 @@ function MagicLinkForm({ callbackUrl }: { callbackUrl: string }) {
   const {
     register,
     handleSubmit,
-    getValues,
     formState: { errors },
   } = useForm<MagicLinkFormValues>({
     resolver: zodResolver(magicLinkSchema),

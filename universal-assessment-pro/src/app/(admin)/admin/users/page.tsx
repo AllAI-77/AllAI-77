@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { motion } from "framer-motion";
 import {
@@ -9,10 +9,11 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { Button }  from "@/components/ui/button";
-import { Input }   from "@/components/ui/input";
-import { Badge }   from "@/components/ui/badge";
+import { Button }   from "@/components/ui/button";
+import { Input }    from "@/components/ui/input";
+import { Badge }    from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Label }    from "@/components/ui/label";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
@@ -22,17 +23,17 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from "@/components/ui/dialog";
-import { Label } from "@/components/ui/label";
 
 import {
   listUsers, setUserActive, resetUserPassword,
   createUser, updateUser, type SafeUser,
 } from "@/lib/actions/user.actions";
-import { ImportUsersDialog } from "@/components/admin/users/ImportUsersDialog";
-import { useForm, Controller } from "react-hook-form";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { z } from "zod";
-import type { Role } from "@prisma/client";
+import { listDepartments, listBranches } from "@/lib/actions/org.actions";
+import { ImportUsersDialog }             from "@/components/admin/users/ImportUsersDialog";
+import { useForm, Controller }           from "react-hook-form";
+import { zodResolver }                   from "@hookform/resolvers/zod";
+import { z }                             from "zod";
+import type { Role }                     from "@prisma/client";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -48,17 +49,19 @@ const ROLE_COLORS: Record<Role, string> = {
   SUPER_ADMIN:     "bg-purple-100 text-purple-700",
   HR_MANAGER:      "bg-blue-100 text-blue-700",
   BRANCH_MANAGER:  "bg-teal-100 text-teal-700",
-  CONTENT_CREATOR: "bg-amber-100 text-amber-700",
+  CONTENT_CREATOR: "bg-orange-100 text-orange-700",
   EMPLOYEE:        "bg-gray-100 text-gray-600",
 };
 
 // ─── User form schema ─────────────────────────────────────────────────────────
 
 const userFormSchema = z.object({
-  name:     z.string().min(2),
-  email:    z.string().email(),
-  role:     z.enum(["SUPER_ADMIN","HR_MANAGER","BRANCH_MANAGER","CONTENT_CREATOR","EMPLOYEE"]),
-  password: z.string().min(8).optional().or(z.literal("")),
+  name:         z.string().min(2, "Min 2 characters"),
+  email:        z.string().email("Invalid email"),
+  role:         z.enum(["SUPER_ADMIN","HR_MANAGER","BRANCH_MANAGER","CONTENT_CREATOR","EMPLOYEE"]),
+  password:     z.string().min(8, "Min 8 characters").optional().or(z.literal("")),
+  departmentId: z.string().optional(),
+  branchId:     z.string().optional(),
 });
 type UserFormValues = z.infer<typeof userFormSchema>;
 
@@ -73,23 +76,40 @@ function UserDialog({
   const isEdit = !!editing;
   const { register, control, handleSubmit, reset, formState: { errors } } =
     useForm<UserFormValues>({
-      resolver: zodResolver(userFormSchema),
-      defaultValues: { name: "", email: "", role: "EMPLOYEE", password: "" },
+      resolver:      zodResolver(userFormSchema),
+      defaultValues: { name: "", email: "", role: "EMPLOYEE", password: "", departmentId: "", branchId: "" },
     });
 
-  useState(() => {
-    if (open && editing) {
-      reset({ name: editing.name ?? "", email: editing.email, role: editing.role, password: "" });
-    } else if (open) {
-      reset({ name: "", email: "", role: "EMPLOYEE", password: "" });
-    }
-  });
+  // Reset form when dialog opens / editing changes
+  useEffect(() => {
+    if (!open) return;
+    reset(editing
+      ? {
+          name:         editing.name ?? "",
+          email:        editing.email,
+          role:         editing.role,
+          password:     "",
+          departmentId: (editing as SafeUser & { departmentId?: string | null }).departmentId ?? "",
+          branchId:     (editing as SafeUser & { branchId?: string | null }).branchId ?? "",
+        }
+      : { name: "", email: "", role: "EMPLOYEE", password: "", departmentId: "", branchId: "" }
+    );
+  }, [open, editing, reset]);
+
+  // Load departments and branches
+  const { data: deptsData }  = useQuery({ queryKey: ["departments"], queryFn: () => listDepartments(), enabled: open });
+  const { data: branchData } = useQuery({ queryKey: ["branches"],    queryFn: () => listBranches(),    enabled: open });
+  const departments = deptsData?.success  ? deptsData.data  : [];
+  const branches    = branchData?.success ? branchData.data : [];
 
   const mutation = useMutation({
-    mutationFn: (data: UserFormValues) =>
-      isEdit
-        ? updateUser({ id: editing!.id, name: data.name, role: data.role as Role })
-        : createUser({ name: data.name, email: data.email, role: data.role as Role, password: data.password || undefined }),
+    mutationFn: (data: UserFormValues) => {
+      const dept = data.departmentId || undefined;
+      const br   = data.branchId     || undefined;
+      return isEdit
+        ? updateUser({ id: editing!.id, name: data.name, role: data.role as Role, departmentId: dept, branchId: br })
+        : createUser({ name: data.name, email: data.email, role: data.role as Role, password: data.password || undefined, departmentId: dept, branchId: br });
+    },
     onSuccess: (res) => {
       if (res.success) { toast.success(isEdit ? "User updated" : "User created"); onSuccess(); }
       else toast.error(res.error);
@@ -107,11 +127,14 @@ function UserDialog({
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={handleSubmit((d) => mutation.mutate(d))} className="space-y-3 py-2">
+          {/* Name */}
           <div className="space-y-1">
             <Label>Full Name <span className="text-red-500">*</span></Label>
             <Input {...register("name")} placeholder="John Doe" />
             {errors.name && <p className="text-xs text-red-500">{errors.name.message}</p>}
           </div>
+
+          {/* Email — only on create */}
           {!isEdit && (
             <div className="space-y-1">
               <Label>Email <span className="text-red-500">*</span></Label>
@@ -119,6 +142,8 @@ function UserDialog({
               {errors.email && <p className="text-xs text-red-500">{errors.email.message}</p>}
             </div>
           )}
+
+          {/* Role */}
           <div className="space-y-1">
             <Label>Role <span className="text-red-500">*</span></Label>
             <Controller name="role" control={control} render={({ field }) => (
@@ -132,6 +157,40 @@ function UserDialog({
               </Select>
             )} />
           </div>
+
+          {/* Department + Branch */}
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <Label>Department</Label>
+              <Controller name="departmentId" control={control} render={({ field }) => (
+                <Select value={field.value ?? ""} onValueChange={field.onChange}>
+                  <SelectTrigger className="text-xs"><SelectValue placeholder="None" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="">None</SelectItem>
+                    {departments.map((d) => (
+                      <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )} />
+            </div>
+            <div className="space-y-1">
+              <Label>Branch</Label>
+              <Controller name="branchId" control={control} render={({ field }) => (
+                <Select value={field.value ?? ""} onValueChange={field.onChange}>
+                  <SelectTrigger className="text-xs"><SelectValue placeholder="None" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="">None</SelectItem>
+                    {branches.map((b) => (
+                      <SelectItem key={b.id} value={b.id}>{b.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )} />
+            </div>
+          </div>
+
+          {/* Password — only on create */}
           {!isEdit && (
             <div className="space-y-1">
               <Label>Initial Password</Label>
@@ -139,6 +198,7 @@ function UserDialog({
               {errors.password && <p className="text-xs text-red-500">{errors.password.message}</p>}
             </div>
           )}
+
           <DialogFooter className="pt-2">
             <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
             <Button type="submit" disabled={mutation.isPending}
@@ -154,14 +214,12 @@ function UserDialog({
 
 // ─── Reset password dialog ────────────────────────────────────────────────────
 
-function ResetPasswordDialog({
-  userId, onClose,
-}: { userId: string | null; onClose: () => void }) {
+function ResetPasswordDialog({ userId, onClose }: { userId: string | null; onClose: () => void }) {
   const [pwd, setPwd] = useState("");
   const mutation = useMutation({
     mutationFn: () => resetUserPassword(userId!, pwd),
     onSuccess: (res) => {
-      if (res.success) { toast.success("Password reset"); onClose(); }
+      if (res.success) { toast.success("Password reset"); onClose(); setPwd(""); }
       else toast.error(res.error);
     },
   });
@@ -182,7 +240,8 @@ function ResetPasswordDialog({
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button disabled={pwd.length < 8 || mutation.isPending} onClick={() => mutation.mutate()}
+          <Button disabled={pwd.length < 8 || mutation.isPending}
+            onClick={() => mutation.mutate()}
             className="bg-red-600 text-white hover:bg-red-700">
             {mutation.isPending ? "Resetting…" : "Reset Password"}
           </Button>
@@ -221,8 +280,7 @@ export default function UsersPage() {
   });
 
   const toggleActive = useMutation({
-    mutationFn: ({ id, isActive }: { id: string; isActive: boolean }) =>
-      setUserActive(id, isActive),
+    mutationFn: ({ id, isActive }: { id: string; isActive: boolean }) => setUserActive(id, isActive),
     onSuccess: (res) => {
       if (res.success) {
         toast.success(`User ${res.data.isActive ? "activated" : "deactivated"}`);
@@ -244,23 +302,13 @@ export default function UsersPage() {
           <p className="text-sm text-gray-500">{total} user{total !== 1 ? "s" : ""}</p>
         </div>
         <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            className="gap-1.5"
-            onClick={() => window.open("/api/export/attempts", "_blank")}
-          >
-            <Download className="h-3.5 w-3.5" />
-            Export Results
+          <Button variant="outline" size="sm" className="gap-1.5"
+            onClick={() => window.open("/api/export/attempts", "_blank")}>
+            <Download className="h-3.5 w-3.5" /> Export Results
           </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            className="gap-1.5"
-            onClick={() => setImportOpen(true)}
-          >
-            <Upload className="h-3.5 w-3.5" />
-            Import
+          <Button variant="outline" size="sm" className="gap-1.5"
+            onClick={() => setImportOpen(true)}>
+            <Upload className="h-3.5 w-3.5" /> Import
           </Button>
           <Button className="gap-2" style={{ backgroundColor: "var(--brand-blue)" }}
             onClick={() => { setEditing(null); setDialogOpen(true); }}>
@@ -276,7 +324,10 @@ export default function UsersPage() {
           <Input className="pl-8 h-8 text-sm" placeholder="Search by name or email…"
             value={search} onChange={(e) => handleSearch(e.target.value)} />
         </div>
-        <Select value={roleFilter ?? "all"} onValueChange={(v: string | null) => { setRoleFilter(!v || v === "all" ? undefined : v as Role); setPage(1); }}>
+        <Select
+          value={roleFilter ?? "all"}
+          onValueChange={(v) => { setRoleFilter(!v || v === "all" ? undefined : v as Role); setPage(1); }}
+        >
           <SelectTrigger className="h-8 w-44 text-sm"><SelectValue placeholder="All roles" /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All roles</SelectItem>
@@ -288,10 +339,8 @@ export default function UsersPage() {
       </div>
 
       {/* Table */}
-      <motion.div
-        initial={{ opacity: 0 }} animate={{ opacity: 1 }}
-        className="rounded-xl border border-gray-100 bg-white shadow-sm overflow-hidden"
-      >
+      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+        className="rounded-xl border border-gray-100 bg-white shadow-sm overflow-hidden">
         <Table>
           <TableHeader>
             <TableRow className="bg-gray-50">
@@ -359,17 +408,12 @@ export default function UsersPage() {
                           onClick={() => setResetUserId(user.id)} title="Reset password">
                           <KeyRound className="h-3.5 w-3.5" />
                         </Button>
-                        <Button
-                          variant="ghost" size="icon"
+                        <Button variant="ghost" size="icon"
                           className={`h-7 w-7 ${user.isActive ? "text-gray-400 hover:text-red-500" : "text-gray-400 hover:text-green-600"}`}
                           disabled={toggleActive.isPending}
                           onClick={() => toggleActive.mutate({ id: user.id, isActive: !user.isActive })}
-                          title={user.isActive ? "Deactivate" : "Activate"}
-                        >
-                          {user.isActive
-                            ? <UserX className="h-3.5 w-3.5" />
-                            : <UserCheck className="h-3.5 w-3.5" />
-                          }
+                          title={user.isActive ? "Deactivate" : "Activate"}>
+                          {user.isActive ? <UserX className="h-3.5 w-3.5" /> : <UserCheck className="h-3.5 w-3.5" />}
                         </Button>
                       </div>
                     </TableCell>
@@ -396,10 +440,7 @@ export default function UsersPage() {
         onSuccess={() => { qc.invalidateQueries({ queryKey: ["users"] }); setDialogOpen(false); setEditing(null); }}
       />
       <ResetPasswordDialog userId={resetUserId} onClose={() => setResetUserId(null)} />
-      <ImportUsersDialog
-        open={importOpen}
-        onOpenChange={setImportOpen}
-      />
+      <ImportUsersDialog open={importOpen} onOpenChange={setImportOpen} />
     </div>
   );
 }

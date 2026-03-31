@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
-  Sparkles, Globe, Trash2, RefreshCw, Check, X,
+  Sparkles, Globe, Trash2, Check, X,
   PlusCircle, Loader2, ChevronDown, ChevronUp, BookOpen,
 } from "lucide-react";
 import { toast } from "sonner";
