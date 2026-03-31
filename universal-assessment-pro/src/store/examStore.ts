@@ -34,7 +34,7 @@ interface ExamState {
 
 export const useExamStore = create<ExamState>()(
   persist(
-    (set, get) => ({
+    (set, _get) => ({
       attemptId: null,
       examId: null,
       currentQuestionIndex: 0,

@@ -5,6 +5,7 @@ const PUBLIC_ROUTES = [
   "/login",
   "/api/auth",
   "/api/certificates/verify",
+  "/api/health",
   "/verify",
   "/magic-link",
   "/error",

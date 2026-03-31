@@ -163,7 +163,7 @@ export function ExamEngine({ examId }: { examId: string }) {
   function toggleFlag(questionId: string) {
     setFlagged((prev) => {
       const next = new Set(prev);
-      next.has(questionId) ? next.delete(questionId) : next.add(questionId);
+      if (next.has(questionId)) { next.delete(questionId); } else { next.add(questionId); }
       return next;
     });
   }

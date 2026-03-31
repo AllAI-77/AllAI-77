@@ -28,13 +28,6 @@ export interface CategoryStat {
   total:    number;
 }
 
-interface ChartsProps {
-  timeline:    TimelinePoint[];
-  scoreBuckets: ScoreBucket[];
-  categories:  CategoryStat[];
-  passCount:   number;
-  failCount:   number;
-}
 
 const BRAND_BLUE = "#003DA5";
 const BRAND_GOLD = "#C8A951";

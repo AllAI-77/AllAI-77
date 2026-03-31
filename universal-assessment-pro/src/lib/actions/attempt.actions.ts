@@ -228,7 +228,7 @@ export async function submitAttempt(
     const passed = score >= attempt.exam.passingScore;
 
     // Persist results in a transaction
-    const [updatedAttempt, certificate] = await db.$transaction(async (tx) => {
+    const [_updatedAttempt, certificate] = await db.$transaction(async (tx) => {
       // Upsert one Response row per question
       for (const qId of questionIds) {
         const isCorrect       = results.get(qId) ?? null;

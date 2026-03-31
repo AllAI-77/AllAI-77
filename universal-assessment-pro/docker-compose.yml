@@ -6,18 +6,18 @@ services:
     container_name: uap_postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: universal_assessment_pro
-      POSTGRES_USER: uap_user
+      POSTGRES_DB:       universal_assessment_pro
+      POSTGRES_USER:     uap_user
       POSTGRES_PASSWORD: uap_secret
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U uap_user -d universal_assessment_pro"]
+      test:     ["CMD-SHELL", "pg_isready -U uap_user -d universal_assessment_pro"]
       interval: 10s
-      timeout: 5s
-      retries: 5
+      timeout:  5s
+      retries:  5
 
   redis:
     image: redis:7-alpine
@@ -29,10 +29,43 @@ services:
       - redis_data:/data
     command: redis-server --appendonly yes --requirepass uap_redis_secret
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "uap_redis_secret", "ping"]
+      test:     ["CMD", "redis-cli", "-a", "uap_redis_secret", "ping"]
       interval: 10s
-      timeout: 5s
-      retries: 5
+      timeout:  5s
+      retries:  5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: uap_app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL:          "postgresql://uap_user:uap_secret@postgres:5432/universal_assessment_pro"
+      REDIS_URL:             "redis://:uap_redis_secret@redis:6379"
+      NEXT_PUBLIC_APP_URL:   "http://localhost:3000"
+      NEXT_PUBLIC_APP_NAME:  "Universal Assessment Pro"
+      AUTH_SECRET:           "${AUTH_SECRET}"
+      EMAIL_SERVER_HOST:     "${EMAIL_SERVER_HOST:-smtp.universalbank.uz}"
+      EMAIL_SERVER_PORT:     "${EMAIL_SERVER_PORT:-587}"
+      EMAIL_SERVER_USER:     "${EMAIL_SERVER_USER:-noreply@universalbank.uz}"
+      EMAIL_SERVER_PASSWORD: "${EMAIL_SERVER_PASSWORD:-}"
+      EMAIL_FROM:            "${EMAIL_FROM:-Universal Assessment Pro <noreply@universalbank.uz>}"
+      ANTHROPIC_API_KEY:     "${ANTHROPIC_API_KEY:-}"
+      NODE_ENV:              "production"
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test:     ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout:  10s
+      retries:  3
+      start_period: 40s
 
 volumes:
   postgres_data:
