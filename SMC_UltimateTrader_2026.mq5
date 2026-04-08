@@ -33,6 +33,14 @@
 //  │  └─ Economic Calendar API (блокировка вблизи USD новостей)       │
 //  └──────────────────────────────────────────────────────────────────┘
 //
+//  ⚡ КЛЮЧЕВЫЕ УЛУЧШЕНИЯ v3.00 vs v2.00:
+//     • Fix: g_FVG присваивается ПОСЛЕ PlaceOrder (устранены двойные ордера)
+//     • Fix: Валидация цены входа vs SYMBOL_TRADE_STOPS_LEVEL (устранён err 10015)
+//     • Fix: Валидация направления SL + проверка маржи (устранён err 10016)
+//     • Fix: HTF фильтр — свинговая структура HH/HL вместо подсчёта свечей
+//     • Fix: Проверка устаревшего FVG (вход > 4×ATR от цены → сброс цикла)
+//     • Fix: DXY фильтр — двойная MA (быстрая/медленная) вместо одиночной
+//
 //  ⚡ КЛЮЧЕВЫЕ УЛУЧШЕНИЯ v2.00 vs v1.00:
 //     • HTF Multi-Timeframe Bias Filter (H4/D1 структурное смещение)
 //     • Динамический TP на пулах ликвидности (а не фиксированный 2R)
@@ -43,10 +51,10 @@
 //     • On-chart информационная панель (Dashboard)
 //     • Оптимизирован для MT5 Strategy Tester (multi-thread safe)
 //
-#property copyright   "SMC Ultimate Trading System 2026 v2.00"
+#property copyright   "SMC Ultimate Trading System 2026 v3.00"
 #property link        "https://github.com/allai-77/allai-77"
-#property version     "2.00"
-#property description "SMC/ICT EA | XAU/USD | Sweep→CISD→FVG | v2.00"
+#property version     "3.00"
+#property description "SMC/ICT EA | XAU/USD | Sweep→CISD→FVG | v3.00"
 #property strict
 
 //+------------------------------------------------------------------+
@@ -338,13 +346,30 @@ void RunPipeline() {
    if(g_Phase == PHASE_ENTRY) {
       SFVG fvg = DetectFVG(g_CD.isBull);
       if(fvg.hi > 0) {
-         g_FVG = fvg;
+         // ── Проверка «устаревшего» FVG: если CE слишком далеко от текущей цены — пропустить ──
+         double atr[]; ArraySetAsSeries(atr,true);
+         double entryCheck = (fvg.status==FVG_INVERTED)
+                             ? (fvg.dir==DIR_BULL ? fvg.lo : fvg.hi)
+                             : fvg.ce;
+         double midPx = (SymbolInfoDouble(_Symbol,SYMBOL_ASK) +
+                         SymbolInfoDouble(_Symbol,SYMBOL_BID)) * 0.5;
+         if(CopyBuffer(g_hATR,0,1,1,atr)>=1 && atr[0]>0) {
+            double dist = MathAbs(entryCheck - midPx);
+            if(dist > atr[0] * 4.0) {
+               Print("[FVG] Вход слишком далеко от цены (",
+                     DoubleToString(dist/atr[0],1), "×ATR). Сброс.");
+               ResetCycle(); return;
+            }
+         }
+
          double sl  = CalcSL(g_CD.isBull, g_Sw);
          double lot = CalcLot(fvg, sl);
+         // FIX: assign g_FVG ONLY after PlaceOrder succeeds (otherwise fvg.ordered/ticket not set)
          if(lot > 0 && PlaceOrder(fvg, sl, lot)) {
-            if(ShowFVG) DrawFVGRect(fvg);
-            Print("► ORDER | ", fvg.dir==DIR_BULL?"BuyLimit":"SellLimit",
-                  " @", DoubleToString(fvg.ce,_Digits),
+            g_FVG = fvg;   // fvg.ordered=true, fvg.ticket valid здесь
+            if(ShowFVG) DrawFVGRect(g_FVG);
+            Print("► ORDER | ", g_FVG.dir==DIR_BULL?"BuyLimit":"SellLimit",
+                  " @", DoubleToString(g_FVG.ce,_Digits),
                   " SL:", DoubleToString(sl,_Digits),
                   " Lot:", DoubleToString(lot,2));
          }
@@ -578,35 +603,89 @@ double CalcLot(const SFVG &fvg, const double sl) {
 //|  ФУНКЦИЯ: PlaceOrder — размещение отложенного ордера            |
 //+------------------------------------------------------------------+
 bool PlaceOrder(SFVG &fvg, const double sl, const double lot) {
+   if(fvg.status==FVG_MITIGATED) { Print("[ORD] FVG закрыт. Отмена."); return false; }
+
    double entry = (fvg.status==FVG_INVERTED)
                   ? (fvg.dir==DIR_BULL ? fvg.lo : fvg.hi)
                   : fvg.ce;
 
-   if(fvg.status==FVG_MITIGATED) { Print("[ORD] FVG закрыт. Отмена."); return false; }
+   ENUM_ORDER_TYPE ot = (fvg.dir==DIR_BULL) ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
 
-   double tp = CalcTPAtLiquidity(fvg.dir==DIR_BULL, entry, sl);
+   // ── ВАЛИДАЦИЯ 1: Размер stop-level буфера брокера ──
+   double pt      = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   long   stopsLv = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   double minDist = (stopsLv + 5) * pt;   // минимальное расстояние (пункты)
 
-   entry = NormalizeDouble(entry, _Digits);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   // ── ВАЛИДАЦИЯ 2: Цена входа должна быть ПОД рынком (BuyLimit) / НАД рынком (SellLimit) ──
+   if(ot == ORDER_TYPE_BUY_LIMIT && entry >= bid - minDist) {
+      Print("[ORD] BuyLimit вход=", DoubleToString(entry,_Digits),
+            " >= Bid-buf=", DoubleToString(bid-minDist,_Digits), ". Сброс цикла.");
+      ResetCycle();
+      return false;
+   }
+   if(ot == ORDER_TYPE_SELL_LIMIT && entry <= ask + minDist) {
+      Print("[ORD] SellLimit вход=", DoubleToString(entry,_Digits),
+            " <= Ask+buf=", DoubleToString(ask+minDist,_Digits), ". Сброс цикла.");
+      ResetCycle();
+      return false;
+   }
+
    double slN = NormalizeDouble(sl, _Digits);
+
+   // ── ВАЛИДАЦИЯ 3: SL должен быть ПОД входом (BuyLimit) / НАД входом (SellLimit) ──
+   if(ot == ORDER_TYPE_BUY_LIMIT && slN >= entry - minDist) {
+      Print("[ORD] BuyLimit SL=", DoubleToString(slN,_Digits),
+            " >= вход=", DoubleToString(entry,_Digits), ". Пропуск.");
+      return false;
+   }
+   if(ot == ORDER_TYPE_SELL_LIMIT && slN <= entry + minDist) {
+      Print("[ORD] SellLimit SL=", DoubleToString(slN,_Digits),
+            " <= вход=", DoubleToString(entry,_Digits), ". Пропуск.");
+      return false;
+   }
+
+   // ── ВАЛИДАЦИЯ 4: Достаточно ли маржи? ──
+   double marginReq = 0;
+   if(OrderCalcMargin(ot, _Symbol, lot, entry, marginReq)) {
+      double marginFree = AccountInfoDouble(ACCOUNT_FREEMARGIN);
+      if(marginFree < marginReq * 1.1) {
+         Print("[ORD] Маржа: свободно=$", DoubleToString(marginFree,2),
+               " требуется=$", DoubleToString(marginReq,2), ". Пропуск.");
+         return false;
+      }
+   }
+
+   double tp  = CalcTPAtLiquidity(fvg.dir==DIR_BULL, entry, sl);
+   entry      = NormalizeDouble(entry, _Digits);
    double tpN = NormalizeDouble(tp, _Digits);
 
-   ENUM_ORDER_TYPE ot = (fvg.dir==DIR_BULL) ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
+   // ── ВАЛИДАЦИЯ 5: TP должен быть НАД входом (Buy) / ПОД входом (Sell) ──
+   if(ot == ORDER_TYPE_BUY_LIMIT  && tpN <= entry + minDist) {
+      Print("[ORD] BuyLimit TP <= вход. Пропуск."); return false;
+   }
+   if(ot == ORDER_TYPE_SELL_LIMIT && tpN >= entry - minDist) {
+      Print("[ORD] SellLimit TP >= вход. Пропуск."); return false;
+   }
+
    datetime exp = TimeCurrent() + (datetime)(OrderExpiry_Hours*3600);
 
    bool ok = g_Trade.OrderOpen(_Symbol, ot, lot, 0, entry, slN, tpN,
                                 ORDER_TIME_SPECIFIED, exp,
                                 EA_Comment+(fvg.dir==DIR_BULL?"_BL":"_SL"));
    if(ok) {
-      fvg.ticket=g_Trade.ResultOrder();
-      fvg.ordered=true;
+      fvg.ticket  = g_Trade.ResultOrder();
+      fvg.ordered = true;
       if(ShowEntryLines) {
-         DrawHL("E_SL_"+IntegerToString(g_ObjN),  slN,  clrRed,     STYLE_SOLID, 1);
-         DrawHL("E_TP_"+IntegerToString(g_ObjN),  tpN,  clrLime,    STYLE_SOLID, 1);
-         DrawHL("E_EN_"+IntegerToString(g_ObjN++),entry, clrYellow,  STYLE_DASH,  1);
+         DrawHL("E_SL_"+IntegerToString(g_ObjN),   slN,   clrRed,    STYLE_SOLID, 1);
+         DrawHL("E_TP_"+IntegerToString(g_ObjN),   tpN,   clrLime,   STYLE_SOLID, 1);
+         DrawHL("E_EN_"+IntegerToString(g_ObjN++), entry, clrYellow, STYLE_DASH,  1);
       }
       return true;
    }
-   Print("[ORD] Ошибка: ",g_Trade.ResultRetcode()," ",g_Trade.ResultRetcodeDescription());
+   Print("[ORD] Ошибка: ", g_Trade.ResultRetcode(), " ", g_Trade.ResultRetcodeDescription());
    return false;
 }
 
@@ -779,39 +858,74 @@ void InitDayTracking() {
 //|  МОДУЛЬ 4: ФИЛЬТРЫ — DXY, HTF, NEWS                            |
 //+------------------------------------------------------------------+
 
-// HTF Bias: смотрим на старшем ТФ — куда идёт рынок?
+// HTF Bias: определяем смещение через структуру свингов HH/HL (бычье) или LH/LL (медвежье)
 bool CheckHTFBias(const bool bull) {
    MqlRates h[]; ArraySetAsSeries(h,true);
-   if(CopyRates(_Symbol,HTF_TimeFrame,0,50,h)<20) return true;
-
-   // Простая модель: Higher Highs / Higher Lows для бычьего смещения
-   // Last 5 bars: bullish if more bullish than bearish candles
-   int bullCnt=0, bearCnt=0;
-   for(int i=1;i<=10;i++) {
-      if(h[i].close>h[i].open) bullCnt++;
-      else bearCnt++;
+   if(CopyRates(_Symbol,HTF_TimeFrame,0,60,h)<30) {
+      Print("[HTF] Недостаточно баров. Фильтр пропущен.");
+      return true;  // Пропускаем фильтр, не блокируем
    }
-   bool htfBull=(bullCnt>bearCnt);
-   bool pass=(bull==htfBull);
-   Print("[HTF] ",EnumToString(HTF_TimeFrame)," смещение: ",
-         htfBull?"БЫЧЬЕ":"МЕДВЕЖЬЕ"," | Требуется: ",bull?"БЫЧЬЕ":"МЕДВЕЖЬЕ",
-         " | ",pass?"OK":"БЛОК");
+
+   // ── Собираем свинговые хаи и лои (простой детектор: экстремум окружён 2 барами с обеих сторон) ──
+   double swH[4], swL[4];  // последние 4 свинга каждого типа
+   int    hCnt=0, lCnt=0;
+
+   for(int i=4; i<56 && (hCnt<4||lCnt<4); i++) {
+      if(hCnt<4 &&
+         h[i].high > h[i-1].high && h[i].high > h[i-2].high &&
+         h[i].high > h[i+1].high && h[i].high > h[i+2].high)
+         swH[hCnt++] = h[i].high;
+
+      if(lCnt<4 &&
+         h[i].low < h[i-1].low && h[i].low < h[i-2].low &&
+         h[i].low < h[i+1].low && h[i].low < h[i+2].low)
+         swL[lCnt++] = h[i].low;
+   }
+
+   // Если свингов мало — не блокируем (мало данных для суждения)
+   if(hCnt<2 && lCnt<2) {
+      Print("[HTF] Свингов недостаточно (H:", hCnt, " L:", lCnt, "). Фильтр пропущен.");
+      return true;
+   }
+
+   // ── Определяем смещение: ──
+   // Бычье: последний свинговый хай > предыдущего (HH) ИЛИ последний свинговый лой > предыдущего (HL)
+   // Медвежье: LH + LL
+   int bullScore = 0, bearScore = 0;
+   if(hCnt>=2) { if(swH[0]>swH[1]) bullScore++; else bearScore++; }
+   if(lCnt>=2) { if(swL[0]>swL[1]) bullScore++; else bearScore++; }
+
+   bool htfBull = (bullScore >= bearScore);  // равно — считаем бычьим (нейтральный = пропустить)
+   bool pass    = (bull == htfBull);
+
+   Print("[HTF] ", EnumToString(HTF_TimeFrame),
+         " HH/HL score=", bullScore, " LH/LL score=", bearScore,
+         " | Смещение: ", htfBull?"БЫЧЬЕ":"МЕДВЕЖЬЕ",
+         " | Требуется: ", bull?"БЫЧЬЕ":"МЕДВЕЖЬЕ",
+         " | ", pass?"OK":"БЛОК");
    return pass;
 }
 
-// DXY/EURUSD корреляционный фильтр
+// DXY/EURUSD корреляционный фильтр (двойная MA: быстрая > медленная = бычий EU = бычий XAU)
 bool CheckDXY(const bool bull) {
    if(!SymbolInfoInteger(DXY_Symbol,SYMBOL_SELECT)) return true;
+   int slowPeriod = DXY_MA_Period;       // по умолчанию 20
+   int fastPeriod = MathMax(5, slowPeriod/4);  // быстрая = slowPeriod/4 (минимум 5)
+   int need = slowPeriod + 5;
    MqlRates d[]; ArraySetAsSeries(d,true);
-   if(CopyRates(DXY_Symbol,TimeFrame,0,DXY_MA_Period+5,d)<DXY_MA_Period+2) return true;
+   if(CopyRates(DXY_Symbol,TimeFrame,0,need,d)<need) return true;
 
-   double sum=0;
-   for(int i=1;i<=DXY_MA_Period;i++) sum+=d[i].close;
-   double ma=sum/DXY_MA_Period;
-   bool euBull=(d[1].close>ma);   // EURUSD бычий = DXY медвежий = XAU бычий
-   bool pass=(bull==euBull);
-   Print("[DXY] ",DXY_Symbol," vs MA",DXY_MA_Period,": ",
-         euBull?"БЫЧИЙ":"МЕДВЕЖИЙ"," | ",pass?"OK":"БЛОК");
+   double sumF=0, sumS=0;
+   for(int i=1;i<=fastPeriod;i++) sumF+=d[i].close;
+   for(int i=1;i<=slowPeriod;i++) sumS+=d[i].close;
+   double maFast = sumF/fastPeriod;
+   double maSlow = sumS/slowPeriod;
+
+   bool euBull = (maFast > maSlow);   // EURUSD fast > slow = DXY медвежий = XAU бычий
+   bool pass   = (bull == euBull);
+   Print("[DXY] ", DXY_Symbol, " MA", fastPeriod, "/MA", slowPeriod,
+         ": ", euBull?"EU_БЫЧИЙ":"EU_МЕДВЕЖИЙ",
+         " | ", pass?"OK":"БЛОК");
    return pass;
 }
 
@@ -1058,5 +1172,5 @@ int BarsFrom(datetime t) {
    return Bars(_Symbol,TimeFrame,t,TimeCurrent());
 }
 //+------------------------------------------------------------------+
-//|  КОНЕЦ ФАЙЛА  SMC_UltimateTrader_2026.mq5  v2.00                |
+//|  КОНЕЦ ФАЙЛА  SMC_UltimateTrader_2026.mq5  v3.00                |
 //+------------------------------------------------------------------+
