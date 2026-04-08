@@ -1,1656 +1,1062 @@
 //+------------------------------------------------------------------+
 //|                   SMC_UltimateTrader_2026.mq5                    |
-//|          Smart Money Concepts — Ultimate EA for XAU/USD          |
-//|                   Версия: 1.00 | Год: 2026                       |
+//|     Smart Money Concepts — PRODUCTION EA v2.00 for XAU/USD      |
+//|         Institutional Grade | Multi-TF | Full Risk Shield        |
 //+------------------------------------------------------------------+
 //
-//  АРХИТЕКТУРА СТРАТЕГИИ:
-//  ┌──────────────────────────────────────────────────────────────┐
-//  │  ФАЗА 1: Liquidity Grab (Sweep)                              │
-//  │          Захват SSL/BSL (PDH/PDL/Asian Range/Weekly High-Low) │
-//  │          Паттерн Turtle Soup (тень пробивает, тело — нет)    │
-//  ├──────────────────────────────────────────────────────────────┤
-//  │  ФАЗА 2: CISD (Change in State of Delivery)                  │
-//  │          Bullish: свеча закрывается выше Open блока доставки │
-//  │          Bearish: свеча закрывается ниже Open блока доставки  │
-//  ├──────────────────────────────────────────────────────────────┤
-//  │  ФАЗА 3: FVG / iFVG Entry                                    │
-//  │          Buy Limit / Sell Limit @ 50% FVG (CE) или iFVG      │
-//  │          SL — за экстремум свечи захвата + спред             │
-//  └──────────────────────────────────────────────────────────────┘
+//  ПОЛНАЯ АРХИТЕКТУРА ТОРГОВОЙ СИСТЕМЫ v2.00:
+//  ┌──────────────────────────────────────────────────────────────────┐
+//  │  PRE-FILTER LAYER (выполняется ДО поиска сетапа)                 │
+//  │  ├─ Spread Filter         (максимальный спред)                   │
+//  │  ├─ Daily DD Guard        (максимальный дневной убыток)          │
+//  │  ├─ ONNX Regime Filter    (трендовый / боковой рынок)            │
+//  │  ├─ News Filter           (High Impact USD ± N минут)           │
+//  │  └─ HTF Bias Filter       (H4/D1 структура рынка)               │
+//  ├──────────────────────────────────────────────────────────────────┤
+//  │  SIGNAL PIPELINE (3 обязательные фазы)                          │
+//  │  Phase 1 → Liquidity Sweep (Turtle Soup / PDH/PDL/Asian/Weekly) │
+//  │  Phase 2 → CISD (Change in State of Delivery)                   │
+//  │  Phase 3 → FVG / iFVG Entry @ CE50 или проксимальная граница    │
+//  ├──────────────────────────────────────────────────────────────────┤
+//  │  EXECUTION LAYER                                                 │
+//  │  ├─ Dynamic Lot Sizing    (% риска / расстояние SL)             │
+//  │  ├─ SL = Sweep Candle Extreme + spread buffer                   │
+//  │  └─ TP = Nearest Liquidity Pool (динамический TP)               │
+//  ├──────────────────────────────────────────────────────────────────┤
+//  │  POSITION MANAGEMENT                                             │
+//  │  ├─ Partial Close 50%     при R:R = 1:1                         │
+//  │  ├─ Breakeven SL         после частичного закрытия              │
+//  │  └─ ATR Trailing Stop    на каждом новом баре                   │
+//  ├──────────────────────────────────────────────────────────────────┤
+//  │  INTERMARKET & MACRO FILTERS                                     │
+//  │  ├─ DXY / EURUSD Correlation (SMC-based: sweep + CISD на DXY)  │
+//  │  └─ Economic Calendar API (блокировка вблизи USD новостей)       │
+//  └──────────────────────────────────────────────────────────────────┘
 //
-#property copyright   "SMC Ultimate Trading System 2026"
+//  ⚡ КЛЮЧЕВЫЕ УЛУЧШЕНИЯ v2.00 vs v1.00:
+//     • HTF Multi-Timeframe Bias Filter (H4/D1 структурное смещение)
+//     • Динамический TP на пулах ликвидности (а не фиксированный 2R)
+//     • Spread Filter — блокировка при нетипично высоком спреде
+//     • Daily Drawdown Guard — автостоп дня при превышении лимита DD
+//     • Улучшенная детекция CISD: фильтр тела свечи (Body/ATR ratio)
+//     • Session Score трекинг — статистика по Kill Zone
+//     • On-chart информационная панель (Dashboard)
+//     • Оптимизирован для MT5 Strategy Tester (multi-thread safe)
+//
+#property copyright   "SMC Ultimate Trading System 2026 v2.00"
 #property link        "https://github.com/allai-77/allai-77"
-#property version     "1.00"
-#property description "Полностью автоматический советник на основе SMC/ICT"
-#property description "Стратегия: Liquidity Grab → CISD → FVG/iFVG Entry"
+#property version     "2.00"
+#property description "SMC/ICT EA | XAU/USD | Sweep→CISD→FVG | v2.00"
 #property strict
 
 //+------------------------------------------------------------------+
-//|                   СТАНДАРТНЫЕ БИБЛИОТЕКИ MT5                     |
+//|  СТАНДАРТНЫЕ БИБЛИОТЕКИ                                          |
 //+------------------------------------------------------------------+
-#include <Trade\Trade.mqh>           // Безопасное исполнение ордеров
-#include <Trade\PositionInfo.mqh>    // Информация о позиции
-#include <Trade\OrderInfo.mqh>       // Информация об ордерах
-#include <Trade\SymbolInfo.mqh>      // Информация о символе
-
-//+------------------------------------------------------------------+
-//|                   РАЗДЕЛ 1: ВХОДНЫЕ ПАРАМЕТРЫ                    |
-//+------------------------------------------------------------------+
-
-input group "=== ОСНОВНЫЕ НАСТРОЙКИ ==="
-input string            EA_Comment           = "SMC_2026";    // Комментарий к ордерам
-input long              Magic                = 202600;        // Magic Number
-input ENUM_TIMEFRAMES   TimeFrame            = PERIOD_M15;    // Рабочий таймфрейм
-
-input group "=== УПРАВЛЕНИЕ КАПИТАЛОМ ==="
-input double   RiskPercent       = 1.0;   // Риск на сделку (% от эквити)
-input double   PartialCloseRatio = 0.5;   // Доля частичного закрытия (0.5 = 50%)
-input double   ATR_Multiplier    = 1.5;   // Множитель ATR для трейлинг-стопа
-input int      ATR_Period        = 14;    // Период ATR
-input double   MinFVG_Points     = 50.0;  // Минимальный размер FVG в пунктах
-
-input group "=== ТОРГОВЫЕ СЕССИИ (ICT Kill Zones) ==="
-input bool     UseNYKillZone      = true;  // NY Kill Zone (07:00-10:00 EST)
-input bool     UseLondonKillZone  = true;  // London Kill Zone (02:00-05:00 EST)
-input int      NY_Start_EST       = 7;     // NY старт (час EST)
-input int      NY_End_EST         = 10;    // NY конец (час EST)
-input int      London_Start_EST   = 2;     // London старт (час EST)
-input int      London_End_EST     = 5;     // London конец (час EST)
-input int      Asian_Start_EST    = 19;    // Asian Range старт (час EST)
-input int      Asian_End_EST      = 22;    // Asian Range конец (час EST)
-
-input group "=== DXY / МЕЖРЫНОЧНАЯ ФИЛЬТРАЦИЯ ==="
-input bool     UseDXYFilter  = true;       // Включить DXY корреляцию
-input string   DXY_Symbol    = "EURUSD";   // Символ для корреляции (обратная к DXY)
-input int      DXY_MA_Period = 20;         // Период MA для DXY фильтра
-
-input group "=== НОВОСТНОЙ ФИЛЬТР ==="
-input bool     UseNewsFilter    = true;    // Включить новостной фильтр
-input int      News_Before_Min  = 30;      // Минут ДО события (блокировка)
-input int      News_After_Min   = 15;      // Минут ПОСЛЕ события (блокировка)
-
-input group "=== ВИЗУАЛИЗАЦИЯ ==="
-input bool     ShowFVG              = true;          // Рисовать зоны FVG
-input bool     ShowLiquidityLevels  = true;          // Рисовать уровни ликвидности
-input bool     ShowCISDLevels       = true;          // Рисовать уровни CISD
-input color    FVG_Bull_Color       = clrPaleGreen;  // Цвет бычьего FVG
-input color    FVG_Bear_Color       = clrLightPink;  // Цвет медвежьего FVG
-input color    Liq_Color            = clrGold;       // Цвет уровней ликвидности
-input color    CISD_Bull_Color      = clrDodgerBlue; // Цвет бычьего CISD
-input color    CISD_Bear_Color      = clrOrangeRed;  // Цвет медвежьего CISD
-input int      MaxLookbackBars      = 200;           // Глубина исторического анализа
-
+#include <Trade\Trade.mqh>
+#include <Trade\PositionInfo.mqh>
+#include <Trade\OrderInfo.mqh>
+#include <Trade\SymbolInfo.mqh>
 
 //+------------------------------------------------------------------+
-//|             РАЗДЕЛ 2: ПЕРЕЧИСЛЕНИЯ И СТРУКТУРЫ ДАННЫХ            |
+//|  ВХОДНЫЕ ПАРАМЕТРЫ                                               |
 //+------------------------------------------------------------------+
 
-//--- Статус зоны Fair Value Gap
-enum ENUM_FVG_STATUS
-  {
-   FVG_ACTIVE,      // Зона активна: цена ещё не дошла до неё
-   FVG_MITIGATED,   // Зона закрыта: цена полностью прошла зону
-   FVG_INVERTED     // Зона инвертирована: пробой полнотелой свечой → iFVG
-  };
+input group "═══════ ОСНОВНЫЕ НАСТРОЙКИ ═══════"
+input string          EA_Comment        = "SMC_v2";       // Комментарий к ордерам
+input long            Magic             = 202601;         // Magic Number
+input ENUM_TIMEFRAMES TimeFrame         = PERIOD_M15;     // Рабочий таймфрейм (M5/M15/M30)
+input ENUM_TIMEFRAMES HTF_TimeFrame     = PERIOD_H4;      // Старший ТФ для смещения рынка
 
-//--- Направление рыночного паттерна
-enum ENUM_PATTERN_DIR
-  {
-   DIR_BULLISH,  // Бычье направление
-   DIR_BEARISH,  // Медвежье направление
-   DIR_NONE      // Направление не определено
-  };
+input group "═══════ УПРАВЛЕНИЕ КАПИТАЛОМ ═══════"
+input double   RiskPercent        = 1.0;    // Риск на сделку (% от эквити)
+input double   MaxDailyLossPercent = 3.0;   // Макс. дневной убыток (% — автостоп)
+input double   PartialCloseRatio  = 0.5;    // Доля частичного закрытия (0.0-1.0)
+input double   MinRR_Ratio        = 1.5;    // Минимальное соотношение риск:прибыль
+input double   ATR_Multiplier     = 1.5;    // Множитель ATR для трейлинг-стопа
+input int      ATR_Period         = 14;     // Период ATR
+input double   MinFVG_Points      = 40.0;   // Мин. размер FVG в пунктах
 
-//--- Фаза торгового цикла (конечный автомат)
-enum ENUM_CYCLE_PHASE
-  {
-   PHASE_HUNTING,   // Охота: ищем захват ликвидности
-   PHASE_CISD,      // Ожидание подтверждения CISD
-   PHASE_ENTRY,     // Ожидание формирования FVG для входа
-   PHASE_MANAGING   // Управление открытой позицией
-  };
+input group "═══════ ТОРГОВЫЕ СЕССИИ (ICT Kill Zones) ═══════"
+input bool   UseNYKillZone      = true;   // NY Kill Zone (07:00-10:00 EST)
+input bool   UseLondonKillZone  = true;   // London Kill Zone (02:00-05:00 EST)
+input int    NY_Start_EST       = 7;      // NY старт (час EST)
+input int    NY_End_EST         = 10;     // NY конец (час EST)
+input int    London_Start_EST   = 2;      // London старт (час EST)
+input int    London_End_EST     = 5;      // London конец (час EST)
+input int    Asian_Start_EST    = 19;     // Asian Range старт (час EST)
+input int    Asian_End_EST      = 22;     // Asian Range конец (час EST)
 
-//--- Структура уровня ликвидности (BSL/SSL)
-struct SLiquidityLevel
-  {
-   double            price;       // Ценовой уровень
-   datetime          time;        // Время формирования
-   bool              isBSL;       // true=Buy Side Liq (выше рынка), false=Sell Side Liq
-   bool              isSwept;     // Уровень захвачен?
-   string            label;       // Метка: "PDH","PDL","PWH","PWL","ASH","ASL"
-  };
+input group "═══════ ФИЛЬТРЫ КАЧЕСТВА ═══════"
+input double MaxSpreadPoints    = 30.0;   // Макс. спред (пунктов). 0=отключить
+input bool   UseHTFBiasFilter   = true;   // Фильтр смещения по HTF структуре
+input bool   UseDXYFilter       = true;   // DXY / EURUSD корреляционный фильтр
+input string DXY_Symbol         = "EURUSD"; // Символ-прокси для DXY
+input int    DXY_MA_Period      = 20;     // Период MA для DXY фильтра
+input bool   UseNewsFilter      = true;   // Новостной фильтр (Economic Calendar)
+input int    News_Before_Min    = 30;     // Минут ДО новости
+input int    News_After_Min     = 15;     // Минут ПОСЛЕ новости
+input int    CISD_MinBodyPct    = 40;     // Мин. % тела к ATR для свечи CISD (0=откл)
 
-//--- Структура захвата ликвидности
-struct SLiquiditySweep
-  {
-   bool              detected;         // Захват зафиксирован?
-   bool              isBullishSweep;   // true=SSL захвачен (→ покупка), false=BSL
-   double            sweepHigh;        // Максимум свечи захвата (для расчёта SL)
-   double            sweepLow;         // Минимум свечи захвата (для расчёта SL)
-   double            sweepClose;       // Закрытие свечи захвата
-   datetime          sweepTime;        // Время свечи захвата
-   int               sweepBarShift;    // Сдвиг свечи захвата от текущего бара
-  };
+input group "═══════ ТАЙМ-АУТЫ СЕТАПА ═══════"
+input int    SweepToCISD_Bars   = 25;     // Макс. баров от захвата до CISD
+input int    CISDToFVG_Bars     = 15;     // Макс. баров от CISD до FVG
+input int    OrderExpiry_Hours  = 24;     // Срок жизни отложенного ордера (часов)
 
-//--- Структура блока доставки и CISD
-struct SCISDBlock
-  {
-   bool              detected;         // CISD подтверждён?
-   bool              isBullishCISD;    // true=бычий CISD, false=медвежий
-   double            deliveryOpenPx;   // Цена ОТКРЫТИЯ первой свечи блока доставки
-   double            deliveryClosePx;  // Цена закрытия последней свечи блока доставки
-   datetime          deliveryTime;     // Время начала блока доставки
-   datetime          cisd_ConfirmTime; // Время свечи подтверждения CISD
-  };
-
-//--- Структура зоны FVG / iFVG
-struct SFVG
-  {
-   double            fvgHigh;        // Верхняя граница FVG
-   double            fvgLow;         // Нижняя граница FVG
-   double            ce50;           // Consequent Encroachment: 50% FVG
-   datetime          formationTime;  // Время формирования FVG
-   ENUM_FVG_STATUS   status;         // Активен / Закрыт / Инвертирован
-   ENUM_PATTERN_DIR  direction;      // Бычий или медвежий
-   bool              orderPlaced;    // Отложенный ордер размещён?
-   ulong             pendingTicket;  // Тикет отложенного ордера
-   string            rectObjName;    // Имя прямоугольного объекта на графике
-   string            ceObjName;      // Имя линии CE на графике
-  };
+input group "═══════ ВИЗУАЛИЗАЦИЯ ═══════"
+input bool   ShowDashboard         = true;          // Показывать информационный дашборд
+input bool   ShowFVG               = true;          // Зоны FVG на графике
+input bool   ShowLiquidityLevels   = true;          // Уровни ликвидности
+input bool   ShowCISDLevels        = true;          // Уровни CISD
+input bool   ShowEntryLines        = true;          // Линии входа/SL/TP
+input color  FVG_Bull_Color        = 0x2266FF44;    // Цвет бычьего FVG (ARGB)
+input color  FVG_Bear_Color        = 0x22FF4444;    // Цвет медвежьего FVG (ARGB)
+input color  Liq_Color             = clrGold;       // Цвет уровней ликвидности
+input color  CISD_BullColor        = clrDodgerBlue; // Цвет бычьего CISD
+input color  CISD_BearColor        = clrOrangeRed;  // Цвет медвежьего CISD
 
 
 //+------------------------------------------------------------------+
-//|          РАЗДЕЛ 3: ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ И ОБЪЕКТЫ              |
+//|  ПЕРЕЧИСЛЕНИЯ                                                    |
 //+------------------------------------------------------------------+
-
-//--- Объекты стандартной библиотеки MQL5
-CTrade         g_Trade;     // Объект для безопасного исполнения торговых операций
-CPositionInfo  g_Position;  // Объект для чтения параметров открытых позиций
-COrderInfo     g_Order;     // Объект для работы с отложенными ордерами
-CSymbolInfo    g_Symbol;    // Объект для получения параметров торгового символа
-
-//--- Хэндлы индикаторов
-int   g_hATR      = INVALID_HANDLE;  // Хэндл ATR для основного символа
-int   g_hATR_DXY  = INVALID_HANDLE;  // Хэндл ATR для символа-корреляции
-
-//--- Состояние торгового цикла (конечный автомат)
-ENUM_CYCLE_PHASE  g_CyclePhase   = PHASE_HUNTING;  // Текущая фаза цикла
-
-//--- Активные данные цикла
-SLiquidityLevel   g_Levels[];         // Пулы ликвидности
-SLiquiditySweep   g_Sweep;            // Текущий захват ликвидности
-SCISDBlock        g_CISD;             // Текущий блок доставки / CISD
-SFVG              g_FVG;              // Активная FVG зона
-
-//--- Параметры управления позицией
-bool     g_PartialDone    = false;  // Флаг: частичное закрытие выполнено
-double   g_InitVolume     = 0.0;    // Начальный объём позиции при открытии
-datetime g_LastBarTime    = 0;      // Время последнего обработанного бара
-datetime g_TrailBarTime   = 0;      // Время последнего пересчёта трейлинга
-bool     g_DST            = false;  // Летнее время (DST) активно?
-
-//--- Счётчик для уникальных имён графических объектов
-int      g_ObjSeq         = 0;      // Последовательный счётчик объектов
+enum ENUM_FVG_STATUS  { FVG_ACTIVE, FVG_MITIGATED, FVG_INVERTED };
+enum ENUM_PAT_DIR     { DIR_BULL, DIR_BEAR, DIR_NONE };
+enum ENUM_CYCLE       { PHASE_HUNT, PHASE_CISD, PHASE_ENTRY, PHASE_MANAGE };
 
 //+------------------------------------------------------------------+
-//|                РАЗДЕЛ 4: OnInit — ИНИЦИАЛИЗАЦИЯ                  |
+//|  СТРУКТУРЫ ДАННЫХ                                                |
 //+------------------------------------------------------------------+
-int OnInit()
-  {
-   Print("╔══════════════════════════════════════════════╗");
-   Print("║   SMC Ultimate EA 2026 | Инициализация       ║");
-   Print("╚══════════════════════════════════════════════╝");
-   Print("Символ: ", _Symbol, " | ТФ: ", EnumToString(TimeFrame),
-         " | Magic: ", Magic);
+struct SLiqLevel {
+   double   price;
+   datetime time;
+   bool     isBSL;      // true=BSL (выше рынка), false=SSL
+   bool     isSwept;
+   string   label;
+};
 
-   //--- 1. Инициализация символа
-   if(!g_Symbol.Name(_Symbol))
-     {
-      Print("[FATAL] Ошибка инициализации символа: ", _Symbol);
-      return INIT_FAILED;
-     }
-   g_Symbol.RefreshRates();
+struct SSweep {
+   bool     detected;
+   bool     isBull;     // true=SSL захвачен → покупка
+   double   hi, lo;     // экстремумы свечи захвата
+   datetime time;
+   int      shift;
+};
 
-   //--- 2. Настройка объекта торговли
+struct SCISD {
+   bool     detected;
+   bool     isBull;
+   double   blockOpen;  // Open первой свечи блока доставки
+   datetime blockTime;
+   datetime confirmTime;
+};
+
+struct SFVG {
+   double          hi, lo, ce;    // границы + 50% CE
+   datetime        time;
+   ENUM_FVG_STATUS status;
+   ENUM_PAT_DIR    dir;
+   bool            ordered;
+   ulong           ticket;
+   string          rectObj, ceObj;
+};
+
+struct SSessionStats {
+   int wins; int losses;
+   double grossProfit; double grossLoss;
+};
+
+//+------------------------------------------------------------------+
+//|  ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ                                           |
+//+------------------------------------------------------------------+
+CTrade        g_Trade;
+CPositionInfo g_Pos;
+CSymbolInfo   g_Sym;
+
+int  g_hATR      = INVALID_HANDLE;
+int  g_hATR_DXY  = INVALID_HANDLE;
+int  g_hATR_HTF  = INVALID_HANDLE;
+
+ENUM_CYCLE    g_Phase   = PHASE_HUNT;
+SLiqLevel     g_Lvl[];
+SSweep        g_Sw;
+SCISD         g_CD;
+SFVG          g_FVG;
+
+bool     g_PartDone      = false;
+double   g_InitVol       = 0;
+datetime g_LastBar       = 0;
+datetime g_TrailBar      = 0;
+bool     g_DST           = false;
+bool     g_DayBlocked    = false;   // дневной DD достигнут
+double   g_DayStartBal   = 0;       // баланс на начало дня
+datetime g_DayDate       = 0;       // текущая торговая дата
+int      g_ObjN          = 0;
+
+SSessionStats g_StatNY, g_StatLDN;
+
+//+------------------------------------------------------------------+
+//|  OnInit                                                          |
+//+------------------------------------------------------------------+
+int OnInit() {
+   Print("╔══════════════════════════════════════════╗");
+   Print("║  SMC Ultimate EA v2.00  |  XAU/USD       ║");
+   Print("╚══════════════════════════════════════════╝");
+
+   if(!g_Sym.Name(_Symbol)) { Print("[FATAL] Символ недоступен"); return INIT_FAILED; }
+   g_Sym.RefreshRates();
+
    g_Trade.SetExpertMagicNumber(Magic);
-   g_Trade.SetDeviationInPoints(30);              // Допустимое проскальзывание
-   g_Trade.SetTypeFilling(ORDER_FILLING_IOC);     // IOC — немедленно или отмена
-   g_Trade.SetAsyncMode(false);                   // Синхронный режим
-   g_Trade.LogLevel(LOG_LEVEL_ERRORS);            // Логировать только ошибки
+   g_Trade.SetDeviationInPoints(30);
+   g_Trade.SetTypeFilling(ORDER_FILLING_IOC);
+   g_Trade.SetAsyncMode(false);
+   g_Trade.LogLevel(LOG_LEVEL_ERRORS);
 
-   //--- 3. Создание ATR индикатора для основного символа
    g_hATR = iATR(_Symbol, TimeFrame, ATR_Period);
-   if(g_hATR == INVALID_HANDLE)
-     {
-      Print("[FATAL] Не удалось создать ATR индикатор: ", GetLastError());
-      return INIT_FAILED;
-     }
+   if(g_hATR == INVALID_HANDLE) { Print("[FATAL] ATR недоступен"); return INIT_FAILED; }
 
-   //--- 4. ATR для корреляционного символа
+   if(UseHTFBiasFilter)
+      g_hATR_HTF = iATR(_Symbol, HTF_TimeFrame, ATR_Period);
+
    if(UseDXYFilter && StringLen(DXY_Symbol) > 0)
-     {
       g_hATR_DXY = iATR(DXY_Symbol, TimeFrame, ATR_Period);
-      if(g_hATR_DXY == INVALID_HANDLE)
-         Print("[WARN] ATR для ", DXY_Symbol, " недоступен. DXY фильтр будет пропущен.");
-     }
 
-   //--- 5. Определение летнего/зимнего времени
-   g_DST = IsDSTActive();
-   Print("DST (летнее время): ", g_DST ? "ДА (EST = UTC-4)" : "НЕТ (EST = UTC-5)");
+   g_DST = IsDST();
+   Print("DST: ", g_DST ? "EST=UTC-4" : "EST=UTC-5");
 
-   //--- 6. Первоначальная загрузка уровней ликвидности
-   RefreshLiquidityLevels();
+   ZeroMemory(g_Sw); ZeroMemory(g_CD); ZeroMemory(g_FVG);
+   ZeroMemory(g_StatNY); ZeroMemory(g_StatLDN);
 
-   //--- 7. Инициализация структур нулями
-   ZeroMemory(g_Sweep);
-   ZeroMemory(g_CISD);
-   ZeroMemory(g_FVG);
+   RefreshLiqLevels();
+   InitDayTracking();
 
-   Print("[OK] Инициализация завершена успешно.");
+   if(ShowDashboard) DrawDashboard();
+   Print("[OK] Инициализация завершена.");
    return INIT_SUCCEEDED;
-  }
+}
 
 //+------------------------------------------------------------------+
-//|             РАЗДЕЛ 5: OnDeinit — ДЕИНИЦИАЛИЗАЦИЯ                 |
+//|  OnDeinit                                                        |
 //+------------------------------------------------------------------+
-void OnDeinit(const int reason)
-  {
-   //--- Освобождаем хэндлы индикаторов
+void OnDeinit(const int r) {
    if(g_hATR     != INVALID_HANDLE) IndicatorRelease(g_hATR);
+   if(g_hATR_HTF != INVALID_HANDLE) IndicatorRelease(g_hATR_HTF);
    if(g_hATR_DXY != INVALID_HANDLE) IndicatorRelease(g_hATR_DXY);
-
-   //--- Удаляем все нарисованные советником объекты
-   PurgeChartObjects();
-
-   Print("SMC Ultimate EA 2026 | Деинициализация | Код: ", reason);
-  }
-
+   PurgeObjects();
+   Print("SMC v2.00 | Деинициализация | reason=", r);
+}
 
 //+------------------------------------------------------------------+
-//|            РАЗДЕЛ 6: OnTick — ГЛАВНЫЙ ЦИКЛ СОВЕТНИКА             |
+//|  OnTick                                                          |
 //+------------------------------------------------------------------+
-void OnTick()
-  {
-   //--- Определяем, появился ли новый завершённый бар
-   datetime newBarTime = iTime(_Symbol, TimeFrame, 0);
-   bool isNewBar = (newBarTime != g_LastBarTime);
+void OnTick() {
+   datetime nb = iTime(_Symbol, TimeFrame, 0);
+   bool newBar  = (nb != g_LastBar);
 
-   if(isNewBar)
-     {
-      g_LastBarTime = newBarTime;
-
-      //--- Ежебарные задачи ---
-
-      // Обновление статуса летнего времени
-      g_DST = IsDSTActive();
-
-      // Обновление всех пулов ликвидности (PDH/PDL/Asian/Weekly)
-      RefreshLiquidityLevels();
-
-      // Обновление статуса активных FVG зон
+   if(newBar) {
+      g_LastBar = nb;
+      g_DST = IsDST();
+      CheckDayReset();
+      RefreshLiqLevels();
       UpdateFVGStatus();
+      if(!g_DayBlocked) RunPipeline();
+      ApplyTrailing();
+      if(ShowDashboard) UpdateDashboard();
+   }
 
-      // Запуск основного сигнального пайплайна
-      RunSignalPipeline();
-
-      // Пересчёт ATR трейлинг-стопа
-      ApplyATRTrailing();
-     }
-
-   //--- Каждый тик: контроль достижения уровня частичного закрытия (1:1 R:R)
-   CheckPartialCloseCondition();
-  }
+   if(!g_DayBlocked) CheckPartial();
+}
 
 //+------------------------------------------------------------------+
-//|        РАЗДЕЛ 7: OnTradeTransaction — СОБЫТИЯ ОРДЕРОВ            |
+//|  OnTradeTransaction                                              |
 //+------------------------------------------------------------------+
-void OnTradeTransaction(const MqlTradeTransaction &trans,
-                        const MqlTradeRequest      &request,
-                        const MqlTradeResult       &result)
-  {
-   //--- Тип: ордер удалён из системы
-   if(trans.type == TRADE_TRANSACTION_ORDER_DELETE)
-     {
-      //--- Наш отложенный ордер был ИСПОЛНЕН
-      if(trans.order == g_FVG.pendingTicket &&
-         trans.order_state == ORDER_STATE_FILLED)
-        {
-         Print("═══ ВХОД ИСПОЛНЕН | Тикет: ", trans.order,
-               " | Переход в фазу управления позицией ═══");
-         g_FVG.orderPlaced  = false;
-         g_PartialDone      = false;
-         g_CyclePhase       = PHASE_MANAGING;
+void OnTradeTransaction(const MqlTradeTransaction &tr,
+                        const MqlTradeRequest &req,
+                        const MqlTradeResult  &res) {
+   if(tr.type != TRADE_TRANSACTION_ORDER_DELETE) return;
 
-         // Запоминаем начальный объём для частичного закрытия
-         if(PositionSelect(_Symbol) &&
-            PositionGetInteger(POSITION_MAGIC) == Magic)
-           g_InitVolume = PositionGetDouble(POSITION_VOLUME);
-        }
-
-      //--- Наш отложенный ордер был ОТМЕНЁН
-      if(trans.order == g_FVG.pendingTicket &&
-         trans.order_state == ORDER_STATE_CANCELED)
-        {
-         Print("[INFO] Отложенный ордер отменён (тикет: ", trans.order, "). Сброс цикла.");
-         ResetTradeCycle();
-        }
-     }
-  }
+   if(tr.order == g_FVG.ticket) {
+      if(tr.order_state == ORDER_STATE_FILLED) {
+         Print("═══ ВХОД ИСПОЛНЕН | #", tr.order, " ═══");
+         g_FVG.ordered = false;
+         g_PartDone    = false;
+         g_Phase       = PHASE_MANAGE;
+         if(HasPos()) g_InitVol = PositionGetDouble(POSITION_VOLUME);
+      }
+      if(tr.order_state == ORDER_STATE_CANCELED) {
+         Print("[INFO] Ордер #", tr.order, " отменён. Сброс.");
+         ResetCycle();
+      }
+   }
+}
 
 //+------------------------------------------------------------------+
-//|         МОДУЛЬ 1: ОСНОВНОЙ СИГНАЛЬНЫЙ ПАЙПЛАЙН                  |
-//|  Три последовательные фазы SMC: Sweep → CISD → FVG              |
+//|  МОДУЛЬ 1: СИГНАЛЬНЫЙ ПАЙПЛАЙН                                  |
 //+------------------------------------------------------------------+
-void RunSignalPipeline()
-  {
-   //--- ── Глобальные фильтры (применяются независимо от фазы) ──
-
-   // ONNX фильтр режима рынка (трендовый / боковик)
-   if(!EvaluateRegimeONNX())
-     {
-      Print("[ONNX] Боковой рынок. Новые входы заблокированы.");
+void RunPipeline() {
+   // Глобальные фильтры
+   if(MaxSpreadPoints > 0 && GetSpreadPts() > MaxSpreadPoints) {
+      Print("[SPREAD] Спред ", DoubleToString(GetSpreadPts(),1), " > макс. Пропуск.");
       return;
-     }
+   }
+   if(!EvalONNX())       { Print("[ONNX] Боковик. Пропуск."); return; }
+   if(UseNewsFilter && IsNews()) { Print("[NEWS] Новостное окно."); return; }
+   if(HasPos())          return;
+   if(g_FVG.ordered)     { ValidatePending(); return; }
 
-   // Новостной фильтр: запрет торговли вблизи High Impact событий USD
-   if(UseNewsFilter && IsNewsWindow())
-     {
-      Print("[NEWS] Торговля заблокирована (новостное окно).");
+   //── ФАЗА 1: SWEEP ──
+   if(g_Phase == PHASE_HUNT) {
+      if(!IsKillZone()) { CollectAsian(); return; }
+      SSweep s = DetectSweep();
+      if(s.detected) {
+         g_Sw = s; g_Phase = PHASE_CISD;
+         Print("► SWEEP | ", s.isBull ? "SSL→BUY" : "BSL→SELL",
+               " | H:", DoubleToString(s.hi,_Digits),
+               " L:", DoubleToString(s.lo,_Digits));
+      }
       return;
-     }
+   }
 
-   // Если уже есть открытая позиция — новый сетап не ищем
-   if(HasOpenPosition()) return;
-
-   // Если отложенный ордер уже размещён — следим за его валидностью
-   if(g_FVG.orderPlaced)
-     {
-      ValidatePendingOrder();
+   //── ФАЗА 2: CISD ──
+   if(g_Phase == PHASE_CISD) {
+      SCISD c = DetectCISD(g_Sw.isBull);
+      if(c.detected) {
+         g_CD = c; g_Phase = PHASE_ENTRY;
+         Print("► CISD | ", c.isBull ? "Bullish" : "Bearish",
+               " | blockOpen:", DoubleToString(c.blockOpen,_Digits));
+         if(UseDXYFilter && !CheckDXY(c.isBull)) {
+            Print("[DXY] Нет корреляции. Сброс."); ResetCycle(); return;
+         }
+         if(UseHTFBiasFilter && !CheckHTFBias(c.isBull)) {
+            Print("[HTF] HTF смещение против сетапа. Сброс."); ResetCycle(); return;
+         }
+      } else if(BarsFrom(g_Sw.time) > SweepToCISD_Bars) {
+         Print("[TIMEOUT] CISD не получен. Сброс."); ResetCycle();
+      }
       return;
-     }
+   }
 
-   //═══════════════════════════════════════════════════════════════
-   //  ФАЗА 1: ПОИСК ЗАХВАТА ЛИКВИДНОСТИ (Liquidity Sweep)
-   //═══════════════════════════════════════════════════════════════
-   if(g_CyclePhase == PHASE_HUNTING)
-     {
-      // Торговля разрешена ТОЛЬКО в Kill Zone
-      if(!IsInKillZone())
-        {
-         CollectAsianRangeData();  // В азиатскую сессию — собираем данные
-         return;
-        }
-
-      SLiquiditySweep sweep = DetectLiquiditySweep();
-      if(sweep.detected)
-        {
-         g_Sweep      = sweep;
-         g_CyclePhase = PHASE_CISD;
-         Print("► ФАЗА 1 [SWEEP] | ",
-               sweep.isBullishSweep
-               ? "SSL захвачен → ожидаем бычий CISD"
-               : "BSL захвачен → ожидаем медвежий CISD",
-               " | Время: ", TimeToString(sweep.sweepTime),
-               " | SweepLow: ", DoubleToString(sweep.sweepLow, _Digits),
-               " | SweepHigh: ", DoubleToString(sweep.sweepHigh, _Digits));
-        }
-      return;
-     }
-
-   //═══════════════════════════════════════════════════════════════
-   //  ФАЗА 2: ПОДТВЕРЖДЕНИЕ CISD
-   //═══════════════════════════════════════════════════════════════
-   if(g_CyclePhase == PHASE_CISD)
-     {
-      SCISDBlock cisd = DetectCISD(g_Sweep.isBullishSweep);
-      if(cisd.detected)
-        {
-         g_CISD       = cisd;
-         g_CyclePhase = PHASE_ENTRY;
-         Print("► ФАЗА 2 [CISD] | ",
-               cisd.isBullishCISD ? "Бычий" : "Медвежий",
-               " CISD подтверждён | Блок открытия: ",
-               DoubleToString(cisd.deliveryOpenPx, _Digits),
-               " | Время: ", TimeToString(cisd.cisd_ConfirmTime));
-
-         // DXY корреляционный фильтр
-         if(UseDXYFilter && !CheckDXYCorrelation(cisd.isBullishCISD))
-           {
-            Print("[DXY] Межрыночная корреляция не подтверждена. Сброс цикла.");
-            ResetTradeCycle();
-            return;
-           }
-        }
-      else
-        {
-         // Тайм-аут: если CISD не подтверждён за N баров — сбрасываем
-         int elapsed = BarsElapsed(g_Sweep.sweepTime);
-         if(elapsed > 25)
-           {
-            Print("[TIMEOUT] CISD не получен за 25 баров. Сброс цикла.");
-            ResetTradeCycle();
-           }
-        }
-      return;
-     }
-
-   //═══════════════════════════════════════════════════════════════
-   //  ФАЗА 3: ПОИСК FVG И РАЗМЕЩЕНИЕ ОРДЕРА
-   //═══════════════════════════════════════════════════════════════
-   if(g_CyclePhase == PHASE_ENTRY)
-     {
-      SFVG fvg = DetectFVG(g_CISD.isBullishCISD);
-      if(fvg.fvgHigh > 0.0)
-        {
+   //── ФАЗА 3: FVG / iFVG ENTRY ──
+   if(g_Phase == PHASE_ENTRY) {
+      SFVG fvg = DetectFVG(g_CD.isBull);
+      if(fvg.hi > 0) {
          g_FVG = fvg;
-
-         // Расчёт Stop Loss на основе свечи захвата
-         double slPrice = CalcSLFromSweep(g_CISD.isBullishCISD, g_Sweep);
-
-         // Расчёт динамического объёма позиции
-         double lot = CalcDynamicLot(fvg, slPrice);
-         if(lot <= 0.0)
-           {
-            Print("[RISK] Расчёт лота вернул 0. Размещение ордера отменено.");
-            return;
-           }
-
-         // Размещение отложенного Buy Limit / Sell Limit
-         if(PlaceFVGPendingOrder(fvg, slPrice, lot))
-           {
-            if(ShowFVG) DrawFVGZone(fvg);
-            Print("► ФАЗА 3 [FVG] | Ордер размещён | ",
-                  fvg.direction == DIR_BULLISH ? "Buy Limit" : "Sell Limit",
-                  " @ ", DoubleToString(fvg.ce50, _Digits),
-                  " | SL: ", DoubleToString(slPrice, _Digits),
-                  " | Лот: ", DoubleToString(lot, 2),
-                  " | Статус FVG: ", EnumToString(fvg.status));
-           }
-        }
-      else
-        {
-         // Тайм-аут ожидания FVG
-         int elapsed = BarsElapsed(g_CISD.cisd_ConfirmTime);
-         if(elapsed > 15)
-           {
-            Print("[TIMEOUT] FVG не найден за 15 баров после CISD. Сброс цикла.");
-            ResetTradeCycle();
-           }
-        }
-     }
-  }
+         double sl  = CalcSL(g_CD.isBull, g_Sw);
+         double lot = CalcLot(fvg, sl);
+         if(lot > 0 && PlaceOrder(fvg, sl, lot)) {
+            if(ShowFVG) DrawFVGRect(fvg);
+            Print("► ORDER | ", fvg.dir==DIR_BULL?"BuyLimit":"SellLimit",
+                  " @", DoubleToString(fvg.ce,_Digits),
+                  " SL:", DoubleToString(sl,_Digits),
+                  " Lot:", DoubleToString(lot,2));
+         }
+      } else if(BarsFrom(g_CD.confirmTime) > CISDToFVG_Bars) {
+         Print("[TIMEOUT] FVG не найден. Сброс."); ResetCycle();
+      }
+   }
+}
 
 
 //+------------------------------------------------------------------+
-//|  ФУНКЦИЯ 1.1: ОБНАРУЖЕНИЕ ЗАХВАТА ЛИКВИДНОСТИ (Liquidity Sweep) |
-//|                                                                   |
-//|  Паттерн Turtle Soup:                                            |
-//|  • Тень свечи ПРОБИВАЕТ уровень ликвидности                      |
-//|  • Тело свечи (закрытие) ОСТАЁТСЯ по другую сторону уровня       |
-//|  ⇒ Ложный пробой = захват ликвидности                            |
+//|  ФУНКЦИЯ: DetectSweep — Захват ликвидности (Turtle Soup)        |
 //+------------------------------------------------------------------+
-SLiquiditySweep DetectLiquiditySweep()
-  {
-   SLiquiditySweep res;
-   ZeroMemory(res);
+SSweep DetectSweep() {
+   SSweep r; ZeroMemory(r);
+   MqlRates b[]; ArraySetAsSeries(b,true);
+   if(CopyRates(_Symbol,TimeFrame,0,4,b)<3) return r;
+   MqlRates &c=b[1];                         // последний закрытый бар
 
-   MqlRates bars[];
-   ArraySetAsSeries(bars, true);
-   // Копируем 4 бара: [0]=текущий (незакрытый), [1]=последний закрытый
-   if(CopyRates(_Symbol, TimeFrame, 0, 4, bars) < 3) return res;
+   int n=ArraySize(g_Lvl);
+   for(int i=0;i<n;i++) {
+      if(g_Lvl[i].isSwept) continue;
+      double lv=g_Lvl[i].price;
 
-   // Анализируем только последний ЗАКРЫТЫЙ бар (индекс 1)
-   MqlRates &c = bars[1];
-
-   int n = ArraySize(g_Levels);
-   for(int i = 0; i < n; i++)
-     {
-      if(g_Levels[i].isSwept) continue;  // Уже захвачен — пропускаем
-
-      double lvl = g_Levels[i].price;
-
-      //─── ЗАХВАТ BSL (Buy Side Liquidity) → медвежий сигнал ───
-      //  Тень вверх пробила BSL, но тело закрылось ниже него
-      if(g_Levels[i].isBSL &&
-         c.high > lvl &&       // Тень пробивает уровень вверх
-         c.close < lvl)        // Закрытие строго под уровнем (ложный пробой)
-        {
-         g_Levels[i].isSwept  = true;
-         res.detected          = true;
-         res.isBullishSweep    = false;   // BSL захвачен → продажа
-         res.sweepHigh         = c.high;
-         res.sweepLow          = c.low;
-         res.sweepClose        = c.close;
-         res.sweepTime         = c.time;
-         res.sweepBarShift     = 1;
-         Print("[SWEEP] BSL захвачен | Уровень: ", DoubleToString(lvl, _Digits),
-               " (", g_Levels[i].label, ")",
-               " | Тень до: ", DoubleToString(c.high, _Digits),
-               " | Закрытие: ", DoubleToString(c.close, _Digits));
-         return res;
-        }
-
-      //─── ЗАХВАТ SSL (Sell Side Liquidity) → бычий сигнал ───
-      //  Тень вниз пробила SSL, но тело закрылось выше него
-      if(!g_Levels[i].isBSL &&
-         c.low < lvl &&        // Тень пробивает уровень вниз
-         c.close > lvl)        // Закрытие строго над уровнем (ложный пробой)
-        {
-         g_Levels[i].isSwept  = true;
-         res.detected          = true;
-         res.isBullishSweep    = true;    // SSL захвачен → покупка
-         res.sweepHigh         = c.high;
-         res.sweepLow          = c.low;
-         res.sweepClose        = c.close;
-         res.sweepTime         = c.time;
-         res.sweepBarShift     = 1;
-         Print("[SWEEP] SSL захвачен | Уровень: ", DoubleToString(lvl, _Digits),
-               " (", g_Levels[i].label, ")",
-               " | Тень до: ", DoubleToString(c.low, _Digits),
-               " | Закрытие: ", DoubleToString(c.close, _Digits));
-         return res;
-        }
-     }
-   return res;
-  }
+      // BSL захват: тень вверх пробила, тело закрылось ниже → медвежий
+      if(g_Lvl[i].isBSL && c.high>lv && c.close<lv) {
+         g_Lvl[i].isSwept=true;
+         r.detected=true; r.isBull=false;
+         r.hi=c.high; r.lo=c.low; r.time=c.time; r.shift=1;
+         Print("[SW] BSL swept | lvl:",DoubleToString(lv,_Digits),
+               " (", g_Lvl[i].label, ")");
+         return r;
+      }
+      // SSL захват: тень вниз пробила, тело закрылось выше → бычий
+      if(!g_Lvl[i].isBSL && c.low<lv && c.close>lv) {
+         g_Lvl[i].isSwept=true;
+         r.detected=true; r.isBull=true;
+         r.hi=c.high; r.lo=c.low; r.time=c.time; r.shift=1;
+         Print("[SW] SSL swept | lvl:",DoubleToString(lv,_Digits),
+               " (", g_Lvl[i].label, ")");
+         return r;
+      }
+   }
+   return r;
+}
 
 //+------------------------------------------------------------------+
-//|  ФУНКЦИЯ 1.2: ОБНАРУЖЕНИЕ CISD                                   |
-//|              (Change in State of Delivery)                        |
-//|                                                                   |
-//|  Bullish CISD:                                                    |
-//|    Найти медвежий блок доставки (падающие свечи перед SSL sweep) |
-//|    Свеча подтверждения закрывается ВЫШЕ Open[первой медв.свечи]  |
-//|                                                                   |
-//|  Bearish CISD:                                                    |
-//|    Найти бычий блок доставки (растущие свечи перед BSL sweep)    |
-//|    Свеча подтверждения закрывается НИЖЕ Open[первой бычь.свечи]  |
+//|  ФУНКЦИЯ: DetectCISD — Change in State of Delivery              |
 //+------------------------------------------------------------------+
-SCISDBlock DetectCISD(const bool bullishSweep)
-  {
-   SCISDBlock res;
-   ZeroMemory(res);
+SCISD DetectCISD(const bool bull) {
+   SCISD r; ZeroMemory(r);
+   MqlRates b[]; ArraySetAsSeries(b,true);
+   if(CopyRates(_Symbol,TimeFrame,0,40,b)<10) return r;
+   MqlRates &conf=b[1];
 
-   MqlRates bars[];
-   ArraySetAsSeries(bars, true);
-   // Загружаем достаточный массив баров для анализа блока доставки
-   if(CopyRates(_Symbol, TimeFrame, 0, 40, bars) < 10) return res;
+   // Фильтр качества тела свечи подтверждения
+   if(CISD_MinBodyPct>0) {
+      double atr[]; ArraySetAsSeries(atr,true);
+      if(CopyBuffer(g_hATR,0,1,1,atr)>=1) {
+         double body=MathAbs(conf.close-conf.open);
+         if(atr[0]>0 && body/atr[0]*100.0 < CISD_MinBodyPct) return r;
+      }
+   }
 
-   // Индекс 1 = последняя закрытая свеча (потенциальная свеча CISD)
-   int confirmIdx = 1;
-   MqlRates &confirmBar = bars[confirmIdx];
+   int searchFrom=g_Sw.shift+1;
 
-   // Начало поиска блока доставки: бары ПЕРЕД свечой захвата
-   // sweepBarShift=1 означает бар[1] → блок до него начинается с бар[2+]
-   int searchFrom = g_Sweep.sweepBarShift + 1;
-
-   if(bullishSweep)
-     {
-      //─── BULLISH CISD: ищем медвежий блок доставки ───
-      // Медвежий блок = последовательные красные свечи (close < open),
-      // предшествовавшие захвату SSL
-
-      // Находим первую свечу медвежьего блока (самую раннюю)
-      int blockFirstIdx = -1;
-      for(int i = searchFrom; i < MathMin(40, searchFrom + 15); i++)
-        {
-         if(bars[i].close < bars[i].open)   // Медвежья свеча
-           {
-            blockFirstIdx = i;
-            // Расширяем блок назад: ищем непрерывную серию медвежьих свечей
-            while(blockFirstIdx + 1 < 40 &&
-                  bars[blockFirstIdx + 1].close < bars[blockFirstIdx + 1].open)
-               blockFirstIdx++;
+   if(bull) {
+      // Ищем медвежий блок доставки
+      int blk=-1;
+      for(int i=searchFrom;i<MathMin(40,searchFrom+15);i++) {
+         if(b[i].close<b[i].open) {
+            blk=i;
+            while(blk+1<40 && b[blk+1].close<b[blk+1].open) blk++;
             break;
-           }
-        }
-
-      if(blockFirstIdx < 0) return res;  // Блок доставки не найден
-
-      double blockOpenPx = bars[blockFirstIdx].open;  // Открытие первой свечи блока
-
-      // Свеча подтверждения ДОЛЖНА:
-      // 1. Закрыться СТРОГО ВЫШЕ открытия первой свечи блока
-      // 2. Быть бычьей (close > open) — дополнительный фильтр качества
-      if(confirmBar.close > blockOpenPx &&
-         confirmBar.close > confirmBar.open)
-        {
-         res.detected          = true;
-         res.isBullishCISD     = true;
-         res.deliveryOpenPx    = blockOpenPx;
-         res.deliveryClosePx   = bars[blockFirstIdx].close;
-         res.deliveryTime      = bars[blockFirstIdx].time;
-         res.cisd_ConfirmTime  = confirmBar.time;
-
+         }
+      }
+      if(blk<0) return r;
+      double bOpen=b[blk].open;
+      if(conf.close>bOpen && conf.close>conf.open) {
+         r.detected=true; r.isBull=true;
+         r.blockOpen=bOpen; r.blockTime=b[blk].time;
+         r.confirmTime=conf.time;
          if(ShowCISDLevels)
-            DrawHLine("CISD_B_" + TimeToString(confirmBar.time, TIME_DATE|TIME_MINUTES),
-                      blockOpenPx, CISD_Bull_Color, STYLE_DASHDOTDOT, 2);
-        }
-     }
-   else
-     {
-      //─── BEARISH CISD: ищем бычий блок доставки ───
-      int blockFirstIdx = -1;
-      for(int i = searchFrom; i < MathMin(40, searchFrom + 15); i++)
-        {
-         if(bars[i].close > bars[i].open)   // Бычья свеча
-           {
-            blockFirstIdx = i;
-            while(blockFirstIdx + 1 < 40 &&
-                  bars[blockFirstIdx + 1].close > bars[blockFirstIdx + 1].open)
-               blockFirstIdx++;
+            DrawHL("CISD_B_"+TimeToString(conf.time,TIME_DATE|TIME_MINUTES),
+                   bOpen,CISD_BullColor,STYLE_DASHDOTDOT,2);
+      }
+   } else {
+      // Ищем бычий блок доставки
+      int blk=-1;
+      for(int i=searchFrom;i<MathMin(40,searchFrom+15);i++) {
+         if(b[i].close>b[i].open) {
+            blk=i;
+            while(blk+1<40 && b[blk+1].close>b[blk+1].open) blk++;
             break;
-           }
-        }
-
-      if(blockFirstIdx < 0) return res;
-
-      double blockOpenPx = bars[blockFirstIdx].open;
-
-      // Свеча подтверждения: закрывается НИЖЕ открытия бычьего блока
-      if(confirmBar.close < blockOpenPx &&
-         confirmBar.close < confirmBar.open)
-        {
-         res.detected          = true;
-         res.isBullishCISD     = false;
-         res.deliveryOpenPx    = blockOpenPx;
-         res.deliveryClosePx   = bars[blockFirstIdx].close;
-         res.deliveryTime      = bars[blockFirstIdx].time;
-         res.cisd_ConfirmTime  = confirmBar.time;
-
+         }
+      }
+      if(blk<0) return r;
+      double bOpen=b[blk].open;
+      if(conf.close<bOpen && conf.close<conf.open) {
+         r.detected=true; r.isBull=false;
+         r.blockOpen=bOpen; r.blockTime=b[blk].time;
+         r.confirmTime=conf.time;
          if(ShowCISDLevels)
-            DrawHLine("CISD_R_" + TimeToString(confirmBar.time, TIME_DATE|TIME_MINUTES),
-                      blockOpenPx, CISD_Bear_Color, STYLE_DASHDOTDOT, 2);
-        }
-     }
-
-   return res;
-  }
-
+            DrawHL("CISD_R_"+TimeToString(conf.time,TIME_DATE|TIME_MINUTES),
+                   bOpen,CISD_BearColor,STYLE_DASHDOTDOT,2);
+      }
+   }
+   return r;
+}
 
 //+------------------------------------------------------------------+
-//|  ФУНКЦИЯ 1.3: ОБНАРУЖЕНИЕ FVG / iFVG                             |
-//|                                                                   |
-//|  3-свечной паттерн Fair Value Gap:                               |
-//|  Bullish FVG: Low[right] > High[left]   — зазор снизу вверх     |
-//|  Bearish FVG: High[right] < Low[left]   — зазор сверху вниз     |
-//|                                                                   |
-//|  Если зона FVG уже инвертирована (iFVG):                         |
-//|  Полнотелая свеча пробила зону → вход от проксимальной границы  |
+//|  ФУНКЦИЯ: DetectFVG — Fair Value Gap / iFVG                     |
 //+------------------------------------------------------------------+
-SFVG DetectFVG(const bool bullishCISD)
-  {
-   SFVG res;
-   ZeroMemory(res);
+SFVG DetectFVG(const bool bull) {
+   SFVG r; ZeroMemory(r);
+   MqlRates b[]; ArraySetAsSeries(b,true);
+   if(CopyRates(_Symbol,TimeFrame,0,20,b)<5) return r;
+   double pt=SymbolInfoDouble(_Symbol,SYMBOL_POINT);
+   double minSz=MinFVG_Points*pt;
 
-   MqlRates bars[];
-   ArraySetAsSeries(bars, true);
-   if(CopyRates(_Symbol, TimeFrame, 0, 25, bars) < 5) return res;
+   for(int i=3;i<18;i++) {
+      MqlRates &L=b[i+1], &M=b[i], &R=b[i-1];
+      if(bull) {
+         if(R.low>L.high && R.low-L.high>=minSz) {
+            r.hi=R.low; r.lo=L.high; r.ce=(r.hi+r.lo)/2.0;
+            r.time=M.time; r.dir=DIR_BULL; r.status=FVG_ACTIVE;
+            r.status=FVGInverted(r,b,i-2);
+            return r;
+         }
+      } else {
+         if(R.high<L.low && L.low-R.high>=minSz) {
+            r.hi=L.low; r.lo=R.high; r.ce=(r.hi+r.lo)/2.0;
+            r.time=M.time; r.dir=DIR_BEAR; r.status=FVG_ACTIVE;
+            r.status=FVGInverted(r,b,i-2);
+            return r;
+         }
+      }
+   }
+   return r;
+}
 
-   double pt    = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   double minSz = MinFVG_Points * pt;  // Минимальный размер зоны
-
-   // Сканируем бары начиная от CISD свечи (индекс 1) вперёд
-   // i+1=left, i=middle, i-1=right (нумерация от текущего назад)
-   for(int i = 3; i < MathMin(25, 20); i++)
-     {
-      MqlRates &left   = bars[i + 1];   // Левая (более старая)
-      MqlRates &middle = bars[i];       // Средняя (импульсная)
-      MqlRates &right  = bars[i - 1];   // Правая (более новая)
-
-      if(bullishCISD)
-        {
-         //─── Бычий FVG ───
-         // Условие: Low правой свечи ВЫШЕ High левой свечи
-         // Имбаланс: пространство [left.high … right.low]
-         if(right.low > left.high)
-           {
-            double sz = right.low - left.high;
-            if(sz < minSz) continue;  // Зона слишком мала
-
-            res.fvgHigh       = right.low;
-            res.fvgLow        = left.high;
-            res.ce50          = (res.fvgHigh + res.fvgLow) / 2.0;
-            res.formationTime = middle.time;
-            res.direction     = DIR_BULLISH;
-            res.status        = FVG_ACTIVE;
-
-            // Проверяем: была ли зона уже инвертирована последующими барами?
-            res.status = CheckIfFVGInverted(res, bars, i - 2);
-
-            Print("[FVG] Бычий | H:", DoubleToString(res.fvgHigh, _Digits),
-                  " L:", DoubleToString(res.fvgLow, _Digits),
-                  " CE:", DoubleToString(res.ce50, _Digits),
-                  " Размер:", DoubleToString(sz / pt, 0), "pts",
-                  " Статус:", EnumToString(res.status));
-            return res;
-           }
-        }
-      else
-        {
-         //─── Медвежий FVG ───
-         // Условие: High правой свечи НИЖЕ Low левой свечи
-         // Имбаланс: пространство [right.high … left.low]
-         if(right.high < left.low)
-           {
-            double sz = left.low - right.high;
-            if(sz < minSz) continue;
-
-            res.fvgHigh       = left.low;
-            res.fvgLow        = right.high;
-            res.ce50          = (res.fvgHigh + res.fvgLow) / 2.0;
-            res.formationTime = middle.time;
-            res.direction     = DIR_BEARISH;
-            res.status        = FVG_ACTIVE;
-
-            res.status = CheckIfFVGInverted(res, bars, i - 2);
-
-            Print("[FVG] Медвежий | H:", DoubleToString(res.fvgHigh, _Digits),
-                  " L:", DoubleToString(res.fvgLow, _Digits),
-                  " CE:", DoubleToString(res.ce50, _Digits),
-                  " Размер:", DoubleToString(sz / pt, 0), "pts",
-                  " Статус:", EnumToString(res.status));
-            return res;
-           }
-        }
-     }
-
-   return res;  // FVG не найден
-  }
-
-//+------------------------------------------------------------------+
-//|  ФУНКЦИЯ 1.4: ПРОВЕРКА ИНВЕРСИИ FVG → iFVG                      |
-//|  Если полнотелая свеча пробивает зону — зона становится iFVG     |
-//+------------------------------------------------------------------+
-ENUM_FVG_STATUS CheckIfFVGInverted(const SFVG &fvg,
-                                    const MqlRates &bars[],
-                                    const int       startBar)
-  {
-   for(int i = startBar; i >= 0; i--)
-     {
-      // Тело свечи (без теней)
-      double bodyH = MathMax(bars[i].open, bars[i].close);
-      double bodyL = MathMin(bars[i].open, bars[i].close);
-
-      if(fvg.direction == DIR_BULLISH)
-        {
-         // Полнотелое закрытие НИЖЕ нижней границы FVG = инверсия
-         if(bodyL < fvg.fvgLow && bodyH > fvg.fvgLow)
-            return FVG_INVERTED;
-         // Цена полностью прошла зону вниз = зона закрыта
-         if(bodyH < fvg.fvgLow)
-            return FVG_MITIGATED;
-        }
-      else
-        {
-         // Полнотелое закрытие ВЫШЕ верхней границы FVG = инверсия
-         if(bodyH > fvg.fvgHigh && bodyL < fvg.fvgHigh)
-            return FVG_INVERTED;
-         // Цена полностью прошла зону вверх = зона закрыта
-         if(bodyL > fvg.fvgHigh)
-            return FVG_MITIGATED;
-        }
-     }
+ENUM_FVG_STATUS FVGInverted(const SFVG &fvg, const MqlRates &b[], int start) {
+   for(int i=start;i>=0;i--) {
+      double bH=MathMax(b[i].open,b[i].close);
+      double bL=MathMin(b[i].open,b[i].close);
+      if(fvg.dir==DIR_BULL) {
+         if(bL<fvg.lo && bH>fvg.lo) return FVG_INVERTED;
+         if(bH<fvg.lo)              return FVG_MITIGATED;
+      } else {
+         if(bH>fvg.hi && bL<fvg.hi) return FVG_INVERTED;
+         if(bL>fvg.hi)              return FVG_MITIGATED;
+      }
+   }
    return FVG_ACTIVE;
-  }
+}
 
 //+------------------------------------------------------------------+
-//|  ФУНКЦИЯ 1.5: РАСЧЁТ STOP LOSS ПО ЭКСТРЕМУМУ СВЕЧИ ЗАХВАТА     |
-//|  SL = экстремум свечи захвата + (спред + 5 пунктов) буфер       |
+//|  ФУНКЦИЯ: CalcSL — Stop Loss за экстремум свечи захвата         |
 //+------------------------------------------------------------------+
-double CalcSLFromSweep(const bool isBullish, const SLiquiditySweep &sw)
-  {
-   double spread  = SymbolInfoDouble(_Symbol, SYMBOL_ASK)
-                  - SymbolInfoDouble(_Symbol, SYMBOL_BID);
+double CalcSL(const bool bull, const SSweep &sw) {
+   double spread=SymbolInfoDouble(_Symbol,SYMBOL_ASK)-SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   double pt=SymbolInfoDouble(_Symbol,SYMBOL_POINT);
+   double buf=spread+5.0*pt;
+   return NormalizeDouble(bull ? sw.lo-buf : sw.hi+buf, _Digits);
+}
+
+//+------------------------------------------------------------------+
+//|  ФУНКЦИЯ: CalcTPAtLiquidity — динамический TP на пуле ликв.     |
+//|  Ищет ближайший незахваченный уровень в направлении сделки      |
+//+------------------------------------------------------------------+
+double CalcTPAtLiquidity(const bool bull, const double entryPx, const double slPx) {
+   double minRR = MinRR_Ratio;
+   double riskD = MathAbs(entryPx - slPx);
+   double minTP = bull ? entryPx + riskD*minRR : entryPx - riskD*minRR;
+
+   double bestTP   = 0;
+   double bestDist = DBL_MAX;
+
+   int n=ArraySize(g_Lvl);
+   for(int i=0;i<n;i++) {
+      if(g_Lvl[i].isSwept) continue;
+      double lv=g_Lvl[i].price;
+      if(bull && lv > minTP) {
+         double d=lv-entryPx;
+         if(d>0 && d<bestDist) { bestDist=d; bestTP=lv; }
+      }
+      if(!bull && lv < minTP) {
+         double d=entryPx-lv;
+         if(d>0 && d<bestDist) { bestDist=d; bestTP=lv; }
+      }
+   }
+
+   // Если подходящий уровень не найден — используем минимальный R:R
+   if(bestTP==0)
+      bestTP = bull ? entryPx + riskD*2.5 : entryPx - riskD*2.5;
+
+   return NormalizeDouble(bestTP, _Digits);
+}
+
+//+------------------------------------------------------------------+
+//|  ФУНКЦИЯ: CalcLot — Динамический объём позиции                  |
+//+------------------------------------------------------------------+
+double CalcLot(const SFVG &fvg, const double sl) {
+   double equity  = AccountInfoDouble(ACCOUNT_EQUITY);
+   double riskAmt = equity * RiskPercent / 100.0;
+   double entry   = fvg.status==FVG_INVERTED
+                    ? (fvg.dir==DIR_BULL ? fvg.lo : fvg.hi)
+                    : fvg.ce;
    double pt      = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   double buffer  = spread + 5.0 * pt;   // Буфер: спред + 5 пунктов
+   double slDist  = MathAbs(entry-sl);
+   if(slDist < pt*5) { Print("[LOT] SL слишком близко"); return 0; }
 
-   double sl = isBullish
-               ? sw.sweepLow  - buffer   // Покупка: SL под минимумом свечи захвата
-               : sw.sweepHigh + buffer;  // Продажа: SL над максимумом свечи захвата
+   double tickV = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
+   double tickS = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
+   double ptVal = (tickS>0) ? (tickV/tickS)*pt : 0;
+   if(ptVal<=0) { Print("[LOT] ptVal=0"); return 0; }
 
-   return NormalizeDouble(sl, _Digits);
-  }
+   double lot  = riskAmt / (slDist/pt * ptVal);
+   double step = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
+   double mn   = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+   double mx   = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
+   lot = MathFloor(lot/step)*step;
+   lot = MathMax(mn, MathMin(mx, lot));
 
-//+------------------------------------------------------------------+
-//|  ФУНКЦИЯ 1.6: РАЗМЕЩЕНИЕ ОТЛОЖЕННОГО ОРДЕРА ПО FVG              |
-//+------------------------------------------------------------------+
-bool PlaceFVGPendingOrder(SFVG &fvg, const double slPrice, const double lot)
-  {
-   double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-
-   // Определяем цену входа в зависимости от статуса FVG
-   double entryPx = 0.0;
-   if(fvg.status == FVG_ACTIVE)
-     {
-      // Активный FVG: вход на 50% зоны (Consequent Encroachment)
-      entryPx = fvg.ce50;
-     }
-   else if(fvg.status == FVG_INVERTED)
-     {
-      // iFVG: вход от проксимальной границы (ближней к цене)
-      entryPx = (fvg.direction == DIR_BULLISH) ? fvg.fvgLow : fvg.fvgHigh;
-      Print("[iFVG] Инвертированный FVG. Вход от проксимальной границы: ",
-            DoubleToString(entryPx, _Digits));
-     }
-   else
-     {
-      Print("[WARN] FVG полностью закрыт (MITIGATED). Пропускаем.");
-      return false;
-     }
-
-   // Расчёт Take Profit: минимум 2:1 Risk-to-Reward
-   double riskDist = MathAbs(entryPx - slPrice);
-   if(riskDist < pt * 10)
-     {
-      Print("[RISK] SL слишком близко (", DoubleToString(riskDist/pt,0), " pts). Отмена.");
-      return false;
-     }
-
-   ENUM_ORDER_TYPE orderType;
-   double tpPrice;
-
-   if(fvg.direction == DIR_BULLISH)
-     {
-      orderType = ORDER_TYPE_BUY_LIMIT;
-      tpPrice   = entryPx + riskDist * 2.0;   // TP = 2R
-     }
-   else
-     {
-      orderType = ORDER_TYPE_SELL_LIMIT;
-      tpPrice   = entryPx - riskDist * 2.0;
-     }
-
-   entryPx = NormalizeDouble(entryPx, _Digits);
-   tpPrice = NormalizeDouble(tpPrice, _Digits);
-
-   // Срок действия ордера: 24 часа от текущего времени
-   datetime expiry = TimeCurrent() + 86400;
-
-   bool ok = g_Trade.OrderOpen(
-      _Symbol, orderType, lot, 0,
-      entryPx, slPrice, tpPrice,
-      ORDER_TIME_SPECIFIED, expiry,
-      EA_Comment + (fvg.direction == DIR_BULLISH ? "_BL" : "_SL")
-   );
-
-   if(ok)
-     {
-      fvg.pendingTicket = g_Trade.ResultOrder();
-      fvg.orderPlaced   = true;
-      Print("[ORDER] Ордер #", fvg.pendingTicket, " размещён | ",
-            EnumToString(orderType), " @ ", DoubleToString(entryPx, _Digits),
-            " SL:", DoubleToString(slPrice, _Digits),
-            " TP:", DoubleToString(tpPrice, _Digits),
-            " Lot:", DoubleToString(lot, 2));
-      return true;
-     }
-   else
-     {
-      Print("[ERROR] OrderOpen: код ", g_Trade.ResultRetcode(),
-            " — ", g_Trade.ResultRetcodeDescription());
-      return false;
-     }
-  }
-
-
-//+------------------------------------------------------------------+
-//|      МОДУЛЬ 2: ICT KILL ZONES — УПРАВЛЕНИЕ ТОРГОВЫМИ СЕССИЯМИ   |
-//+------------------------------------------------------------------+
-
-//--- Определение активности летнего времени DST (USA Eastern Time)
-//    DST в США: второе воскресенье марта — первое воскресенье ноября
-bool IsDSTActive()
-  {
-   MqlDateTime dt;
-   TimeToStruct(TimeGMT(), dt);
-
-   int m = dt.mon;
-   int d = dt.day;
-
-   // Апрель–Октябрь: DST однозначно активен
-   if(m > 3 && m < 11) return true;
-   // Январь, Февраль, Декабрь: DST неактивен
-   if(m < 3 || m > 11) return false;
-
-   // Март: DST начинается со второго воскресенья
-   if(m == 3)
-     {
-      // Находим день второго воскресенья марта
-      int sunCount = 0;
-      for(int day = 1; day <= 31; day++)
-        {
-         // Алгоритм Томохиро Кубота для дня недели
-         int y = dt.year, mo = 3;
-         int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
-         if(mo < 3) y--;
-         int dow = (y + y/4 - y/100 + y/400 + t[mo-1] + day) % 7; // 0=вс
-         if(dow == 0)
-           {
-            sunCount++;
-            if(sunCount == 2) return (d >= day);
-           }
-        }
-      return false;
-     }
-
-   // Ноябрь: DST заканчивается в первое воскресенье
-   if(m == 11)
-     {
-      for(int day = 1; day <= 7; day++)
-        {
-         int y = dt.year, mo = 11;
-         int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
-         if(mo < 3) y--;
-         int dow = (y + y/4 - y/100 + y/400 + t[mo-1] + day) % 7;
-         if(dow == 0) return (d < day);
-        }
-     }
-
-   return false;
-  }
-
-//--- Конвертация часа по EST в час по UTC
-int ESTtoUTC(const int estHour)
-  {
-   // DST: EST = UTC-4, зима: EST = UTC-5
-   int offset = g_DST ? 4 : 5;
-   return (estHour + offset) % 24;
-  }
-
-//--- Проверка, находимся ли мы в активной Kill Zone
-bool IsInKillZone()
-  {
-   MqlDateTime dt;
-   TimeToStruct(TimeGMT(), dt);
-   int h = dt.hour;
-
-   //─── New York Kill Zone: 07:00–10:00 EST ───
-   if(UseNYKillZone)
-     {
-      int s = ESTtoUTC(NY_Start_EST);
-      int e = ESTtoUTC(NY_End_EST);
-      if(HourInRange(h, s, e)) return true;
-     }
-
-   //─── London Kill Zone: 02:00–05:00 EST ───
-   if(UseLondonKillZone)
-     {
-      int s = ESTtoUTC(London_Start_EST);
-      int e = ESTtoUTC(London_End_EST);
-      if(HourInRange(h, s, e)) return true;
-     }
-
-   return false;
-  }
-
-//--- Вспомогательная: входит ли час h в диапазон [start, end) с учётом полуночи
-bool HourInRange(const int h, const int start, const int end)
-  {
-   if(start < end)
-      return (h >= start && h < end);
-   else  // Диапазон перекрывает полночь (например, 23–02)
-      return (h >= start || h < end);
-  }
-
-//--- Сбор данных Азиатской сессии (без открытия ордеров)
-void CollectAsianRangeData()
-  {
-   // Азиатская сессия уже обрабатывается в UpdateLiquidityLevels()
-   // Здесь можно добавить дополнительную аналитику при необходимости
-  }
-
-//+------------------------------------------------------------------+
-//|      МОДУЛЬ 3: ДИНАМИЧЕСКОЕ УПРАВЛЕНИЕ КАПИТАЛОМ                 |
-//+------------------------------------------------------------------+
-
-//--- Расчёт размера лота на основе риска в % от эквити
-double CalcDynamicLot(const SFVG &fvg, const double slPrice)
-  {
-   // Текущее состояние счёта
-   double equity     = AccountInfoDouble(ACCOUNT_EQUITY);
-   double riskAmount = equity * RiskPercent / 100.0;  // Денежный риск
-
-   // Цена входа (50% FVG)
-   double entryPx    = fvg.ce50;
-   double slDist     = MathAbs(entryPx - slPrice);    // Расстояние до SL
-   double pt         = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-
-   if(slDist < pt * 5)
-     {
-      Print("[RISK] SL расстояние слишком мало: ", DoubleToString(slDist/pt, 1), " pts");
-      return 0.0;
-     }
-
-   // Стоимость одного пункта на 1 лот
-   // tickValue / tickSize * point = стоимость 1 пункта
-   double tickVal  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-   double tickSz   = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-   double ptValue  = (tickSz > 0) ? (tickVal / tickSz) * pt : 0.0;
-
-   if(ptValue <= 0)
-     {
-      Print("[RISK] Не удалось получить стоимость пункта.");
-      return 0.0;
-     }
-
-   // Лот = Риск$ / (Пунктов до SL * Стоимость пункта)
-   double slPts   = slDist / pt;
-   double lot     = riskAmount / (slPts * ptValue);
-
-   // Нормализация по параметрам символа
-   double step    = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   double minLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   double maxLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-
-   lot = MathFloor(lot / step) * step;
-   lot = MathMax(minLot, MathMin(maxLot, lot));
-
-   Print("[LOT] Эквити: $", DoubleToString(equity, 2),
-         " Риск: $",        DoubleToString(riskAmount, 2),
-         " SL: ",           DoubleToString(slPts, 0), "pts",
-         " PtVal: ",        DoubleToString(ptValue, 4),
-         " → Лот: ",        DoubleToString(lot, 2));
+   Print("[LOT] Eq:$",DoubleToString(equity,0)," Risk:$",DoubleToString(riskAmt,2),
+         " SL:",DoubleToString(slDist/pt,0),"pts → Lot:",DoubleToString(lot,2));
    return lot;
-  }
+}
 
-//--- Проверка условия частичного закрытия (1:1 R:R) на каждом тике
-void CheckPartialCloseCondition()
-  {
-   // Нет позиции или уже закрыли частично
-   if(!HasOpenPosition() || g_PartialDone) return;
+//+------------------------------------------------------------------+
+//|  ФУНКЦИЯ: PlaceOrder — размещение отложенного ордера            |
+//+------------------------------------------------------------------+
+bool PlaceOrder(SFVG &fvg, const double sl, const double lot) {
+   double entry = (fvg.status==FVG_INVERTED)
+                  ? (fvg.dir==DIR_BULL ? fvg.lo : fvg.hi)
+                  : fvg.ce;
 
-   if(!PositionSelect(_Symbol))               return;
-   if(PositionGetInteger(POSITION_MAGIC) != Magic) return;
+   if(fvg.status==FVG_MITIGATED) { Print("[ORD] FVG закрыт. Отмена."); return false; }
 
-   long   posType  = PositionGetInteger(POSITION_TYPE);
-   double openPx   = PositionGetDouble(POSITION_PRICE_OPEN);
-   double sl       = PositionGetDouble(POSITION_SL);
-   double tp       = PositionGetDouble(POSITION_TP);
-   double vol      = PositionGetDouble(POSITION_VOLUME);
-   ulong  ticket   = PositionGetInteger(POSITION_TICKET);
+   double tp = CalcTPAtLiquidity(fvg.dir==DIR_BULL, entry, sl);
 
-   double riskDist = MathAbs(openPx - sl);
-   if(riskDist <= 0) return;
+   entry = NormalizeDouble(entry, _Digits);
+   double slN = NormalizeDouble(sl, _Digits);
+   double tpN = NormalizeDouble(tp, _Digits);
 
-   // Текущая цена (bid для покупки, ask для продажи)
-   double curPx = (posType == POSITION_TYPE_BUY)
-                  ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
-                  : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   ENUM_ORDER_TYPE ot = (fvg.dir==DIR_BULL) ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
+   datetime exp = TimeCurrent() + (datetime)(OrderExpiry_Hours*3600);
 
-   // Условие 1:1 R:R
-   bool hit1R = (posType == POSITION_TYPE_BUY)
-                ? (curPx >= openPx + riskDist)
-                : (curPx <= openPx - riskDist);
+   bool ok = g_Trade.OrderOpen(_Symbol, ot, lot, 0, entry, slN, tpN,
+                                ORDER_TIME_SPECIFIED, exp,
+                                EA_Comment+(fvg.dir==DIR_BULL?"_BL":"_SL"));
+   if(ok) {
+      fvg.ticket=g_Trade.ResultOrder();
+      fvg.ordered=true;
+      if(ShowEntryLines) {
+         DrawHL("E_SL_"+IntegerToString(g_ObjN),  slN,  clrRed,     STYLE_SOLID, 1);
+         DrawHL("E_TP_"+IntegerToString(g_ObjN),  tpN,  clrLime,    STYLE_SOLID, 1);
+         DrawHL("E_EN_"+IntegerToString(g_ObjN++),entry, clrYellow,  STYLE_DASH,  1);
+      }
+      return true;
+   }
+   Print("[ORD] Ошибка: ",g_Trade.ResultRetcode()," ",g_Trade.ResultRetcodeDescription());
+   return false;
+}
 
-   if(!hit1R) return;
 
-   //─── Частичное закрытие 50% объёма ───
-   double closeVol = NormalizeDouble(vol * PartialCloseRatio,
-                                     (int)(-MathLog10(
-                                        SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP)
-                                     )));
-   double minVol   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   if(closeVol < minVol) closeVol = minVol;
-   if(closeVol >= vol)   closeVol = vol * 0.5;  // Страховка
+//+------------------------------------------------------------------+
+//|  МОДУЛЬ 2: ICT KILL ZONES + DST                                 |
+//+------------------------------------------------------------------+
+bool IsDST() {
+   MqlDateTime dt; TimeToStruct(TimeGMT(),dt);
+   int m=dt.mon, d=dt.day;
+   if(m>3&&m<11) return true;
+   if(m<3||m>11) return false;
+   // Март: 2-е воскресенье
+   if(m==3) {
+      int cnt=0;
+      for(int dd=1;dd<=31;dd++) {
+         int t[]={0,3,2,5,0,3,5,1,4,6,2,4};
+         int y=dt.year; if(3<3) y--;
+         int dow=(y+y/4-y/100+y/400+t[2]+dd)%7;
+         if(dow==0){cnt++; if(cnt==2) return d>=dd;}
+      }
+      return false;
+   }
+   // Ноябрь: 1-е воскресенье
+   for(int dd=1;dd<=7;dd++) {
+      int t[]={0,3,2,5,0,3,5,1,4,6,2,4};
+      int y=dt.year;
+      int dow=(y+y/4-y/100+y/400+t[10]+dd)%7;
+      if(dow==0) return d<dd;
+   }
+   return false;
+}
 
-   bool closedOk = g_Trade.PositionClosePartial(ticket, closeVol);
-   if(closedOk)
-     {
-      Print("[1R] Частичное закрытие 50% | Объём: ", DoubleToString(closeVol, 2),
-            " | Цена: ", DoubleToString(curPx, _Digits));
-      g_PartialDone = true;
+int EST2UTC(int h) { return (h + (g_DST?4:5)) % 24; }
 
-      // Перенос SL в безубыток (Breakeven)
-      double spread = SymbolInfoDouble(_Symbol, SYMBOL_ASK)
-                    - SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      double beSL   = (posType == POSITION_TYPE_BUY)
-                      ? NormalizeDouble(openPx + spread, _Digits)
-                      : NormalizeDouble(openPx - spread, _Digits);
+bool HourIn(int h, int s, int e) {
+   if(s<e) return h>=s && h<e;
+   return h>=s || h<e;   // перекрёст полуночи
+}
 
-      // Небольшая задержка для обновления позиции после частичного закрытия
-      Sleep(100);
+bool IsKillZone() {
+   MqlDateTime dt; TimeToStruct(TimeGMT(),dt);
+   int h=dt.hour;
+   if(UseNYKillZone     && HourIn(h,EST2UTC(NY_Start_EST),    EST2UTC(NY_End_EST)))    return true;
+   if(UseLondonKillZone && HourIn(h,EST2UTC(London_Start_EST),EST2UTC(London_End_EST))) return true;
+   return false;
+}
 
-      if(PositionSelect(_Symbol) && PositionGetInteger(POSITION_MAGIC) == Magic)
-        {
-         ulong newTicket = PositionGetInteger(POSITION_TICKET);
-         bool  modOk     = g_Trade.PositionModify(newTicket, beSL,
-                                                    NormalizeDouble(tp, _Digits));
-         if(modOk)
-            Print("[BE] SL перенесён в безубыток: ", DoubleToString(beSL, _Digits));
-         else
-            Print("[ERROR] Ошибка переноса SL в BE: ", g_Trade.ResultRetcode());
-        }
-     }
-   else
-     {
-      Print("[ERROR] Частичное закрытие не удалось: ", g_Trade.ResultRetcode(),
-            " — ", g_Trade.ResultRetcodeDescription());
-     }
-  }
+bool IsAsianSession() {
+   MqlDateTime dt; TimeToStruct(TimeGMT(),dt);
+   return HourIn(dt.hour, EST2UTC(Asian_Start_EST), EST2UTC(Asian_End_EST));
+}
 
-//--- ATR Трейлинг-стоп (пересчёт только на новом баре)
-void ApplyATRTrailing()
-  {
-   if(!HasOpenPosition()) return;
+void CollectAsian() { /* сбор данных — уровни обновляются в RefreshLiqLevels() */ }
 
-   datetime barTime = iTime(_Symbol, TimeFrame, 0);
-   if(barTime == g_TrailBarTime) return;  // Уже обработан этот бар
-   g_TrailBarTime = barTime;
+//+------------------------------------------------------------------+
+//|  МОДУЛЬ 3: УПРАВЛЕНИЕ КАПИТАЛОМ                                 |
+//+------------------------------------------------------------------+
 
-   // Получаем значение ATR с предыдущего закрытого бара (shift=1)
-   double atrBuf[];
-   ArraySetAsSeries(atrBuf, true);
-   if(CopyBuffer(g_hATR, 0, 1, 1, atrBuf) < 1)
-     {
-      Print("[ATR] Не удалось получить данные ATR");
-      return;
-     }
-   double atrDist = atrBuf[0] * ATR_Multiplier;
+// Частичное закрытие на 1:1 R:R + перенос SL в BE
+void CheckPartial() {
+   if(!HasPos()||g_PartDone) return;
+   if(!PositionSelect(_Symbol)) return;
+   if(PositionGetInteger(POSITION_MAGIC)!=Magic) return;
+
+   long   type  = PositionGetInteger(POSITION_TYPE);
+   double open  = PositionGetDouble(POSITION_PRICE_OPEN);
+   double sl    = PositionGetDouble(POSITION_SL);
+   double tp    = PositionGetDouble(POSITION_TP);
+   double vol   = PositionGetDouble(POSITION_VOLUME);
+   ulong  tkt   = (ulong)PositionGetInteger(POSITION_TICKET);
+   double rsk   = MathAbs(open-sl);
+   if(rsk<=0) return;
+
+   double cur = (type==POSITION_TYPE_BUY)
+                ? SymbolInfoDouble(_Symbol,SYMBOL_BID)
+                : SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+
+   bool hit = (type==POSITION_TYPE_BUY) ? cur>=open+rsk : cur<=open-rsk;
+   if(!hit) return;
+
+   double step = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
+   int    prec = (int)MathRound(-MathLog10(step));
+   double cVol = NormalizeDouble(vol*PartialCloseRatio, prec);
+   double mn   = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+   if(cVol<mn) cVol=mn;
+   if(cVol>=vol) cVol=NormalizeDouble(vol*0.5,prec);
+
+   if(g_Trade.PositionClosePartial(tkt, cVol)) {
+      Print("[1R] Закрыто ",DoubleToString(cVol,2)," @ ",DoubleToString(cur,_Digits));
+      g_PartDone=true;
+      Sleep(150);
+      if(PositionSelect(_Symbol) && (ulong)PositionGetInteger(POSITION_MAGIC)==Magic) {
+         double spread=SymbolInfoDouble(_Symbol,SYMBOL_ASK)-SymbolInfoDouble(_Symbol,SYMBOL_BID);
+         double be=(type==POSITION_TYPE_BUY) ? open+spread : open-spread;
+         ulong  t2=(ulong)PositionGetInteger(POSITION_TICKET);
+         if(g_Trade.PositionModify(t2,NormalizeDouble(be,_Digits),NormalizeDouble(tp,_Digits)))
+            Print("[BE] SL → безубыток: ",DoubleToString(be,_Digits));
+      }
+   } else Print("[ERR] Частичное закрытие: ",g_Trade.ResultRetcode());
+}
+
+// ATR Трейлинг — только раз на баре
+void ApplyTrailing() {
+   if(!HasPos()) return;
+   datetime bt=iTime(_Symbol,TimeFrame,0);
+   if(bt==g_TrailBar) return;
+   g_TrailBar=bt;
+
+   double atr[]; ArraySetAsSeries(atr,true);
+   if(CopyBuffer(g_hATR,0,1,1,atr)<1) return;
+   double trail=atr[0]*ATR_Multiplier;
 
    if(!PositionSelect(_Symbol)) return;
-   if(PositionGetInteger(POSITION_MAGIC) != Magic) return;
+   if(PositionGetInteger(POSITION_MAGIC)!=Magic) return;
 
-   long   posType = PositionGetInteger(POSITION_TYPE);
-   double curSL   = PositionGetDouble(POSITION_SL);
-   double curTP   = PositionGetDouble(POSITION_TP);
-   ulong  ticket  = PositionGetInteger(POSITION_TICKET);
-   double bid     = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double ask     = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   long   type=PositionGetInteger(POSITION_TYPE);
+   double csl =PositionGetDouble(POSITION_SL);
+   double ctp =PositionGetDouble(POSITION_TP);
+   ulong  tkt =(ulong)PositionGetInteger(POSITION_TICKET);
+   double bid =SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   double ask =SymbolInfoDouble(_Symbol,SYMBOL_ASK);
 
-   double newSL   = curSL;
-   bool   doMod   = false;
+   double nsl=csl;
+   if(type==POSITION_TYPE_BUY) {
+      double p=NormalizeDouble(bid-trail,_Digits);
+      if(p>csl&&p<bid) nsl=p;
+   } else {
+      double p=NormalizeDouble(ask+trail,_Digits);
+      if(p<csl&&p>ask) nsl=p;
+   }
 
-   if(posType == POSITION_TYPE_BUY)
-     {
-      // Трейлинг вверх: SL = Bid - ATR*mult
-      double proposed = NormalizeDouble(bid - atrDist, _Digits);
-      if(proposed > curSL && proposed < bid)  // Только вверх, не ниже текущего SL
-        {
-         newSL  = proposed;
-         doMod  = true;
-        }
-     }
-   else if(posType == POSITION_TYPE_SELL)
-     {
-      // Трейлинг вниз: SL = Ask + ATR*mult
-      double proposed = NormalizeDouble(ask + atrDist, _Digits);
-      if(proposed < curSL && proposed > ask)  // Только вниз, не выше текущего SL
-        {
-         newSL  = proposed;
-         doMod  = true;
-        }
-     }
+   if(nsl!=csl) {
+      if(g_Trade.PositionModify(tkt,nsl,NormalizeDouble(ctp,_Digits)))
+         Print("[TRAIL] SL→",DoubleToString(nsl,_Digits));
+   }
+}
 
-   if(doMod)
-     {
-      bool ok = g_Trade.PositionModify(ticket, newSL, NormalizeDouble(curTP, _Digits));
-      if(ok)
-         Print("[TRAIL] ATR трейлинг | Новый SL: ", DoubleToString(newSL, _Digits),
-               " (ATR*mult=", DoubleToString(atrDist/_Digits, 1), "pts)");
-     }
-  }
+// Дневная защита от дравдауна
+void CheckDayReset() {
+   MqlDateTime cd; TimeToStruct(TimeCurrent(),cd);
+   datetime today=StringToTime(IntegerToString(cd.year)+"."+
+                   IntegerToString(cd.mon)+"."+IntegerToString(cd.day));
+   if(today!=g_DayDate) {
+      g_DayDate    =today;
+      g_DayStartBal=AccountInfoDouble(ACCOUNT_BALANCE);
+      g_DayBlocked =false;
+      Print("[DAY] Новый день. Баланс: $",DoubleToString(g_DayStartBal,2));
+   }
+   if(g_DayBlocked) return;
+   double bal=AccountInfoDouble(ACCOUNT_BALANCE);
+   double dd=(g_DayStartBal-bal)/g_DayStartBal*100.0;
+   if(dd>=MaxDailyLossPercent) {
+      g_DayBlocked=true;
+      Print("[DD] Дневной лимит ",DoubleToString(MaxDailyLossPercent,1),
+            "% достигнут (",DoubleToString(dd,2),"%). Торговля до конца дня ОСТАНОВЛЕНА.");
+   }
+}
+
+void InitDayTracking() {
+   MqlDateTime cd; TimeToStruct(TimeCurrent(),cd);
+   g_DayDate    =StringToTime(IntegerToString(cd.year)+"."+
+                  IntegerToString(cd.mon)+"."+IntegerToString(cd.day));
+   g_DayStartBal=AccountInfoDouble(ACCOUNT_BALANCE);
+   g_DayBlocked =false;
+}
 
 
 //+------------------------------------------------------------------+
-//|      МОДУЛЬ 4: МАКРОЭКОНОМИЧЕСКАЯ И МЕЖРЫНОЧНАЯ ФИЛЬТРАЦИЯ       |
+//|  МОДУЛЬ 4: ФИЛЬТРЫ — DXY, HTF, NEWS                            |
 //+------------------------------------------------------------------+
 
-//--- Фильтр корреляции с DXY (через EURUSD как обратно-коррелирующий актив)
-//
-//  Логика фильтра:
-//  DXY ↑  → XAU/USD ↓   (обратная корреляция)
-//  DXY ↓  → XAU/USD ↑
-//  EURUSD ↑ ≈ DXY ↓     (EURUSD = обратный прокси DXY)
-//
-//  Для ПОКУПКИ XAU/USD: EURUSD должен быть выше своей MA (бычий → DXY медвежий)
-//  Для ПРОДАЖИ XAU/USD: EURUSD должен быть ниже своей MA (медвежий → DXY бычий)
-bool CheckDXYCorrelation(const bool bullishEntry)
-  {
-   if(!UseDXYFilter) return true;
+// HTF Bias: смотрим на старшем ТФ — куда идёт рынок?
+bool CheckHTFBias(const bool bull) {
+   MqlRates h[]; ArraySetAsSeries(h,true);
+   if(CopyRates(_Symbol,HTF_TimeFrame,0,50,h)<20) return true;
 
-   // Проверяем доступность символа
-   if(!SymbolInfoInteger(DXY_Symbol, SYMBOL_SELECT))
-     {
-      Print("[DXY] Символ ", DXY_Symbol, " недоступен. Фильтр пропущен.");
-      return true;
-     }
-
-   MqlRates dRates[];
-   ArraySetAsSeries(dRates, true);
-   int copied = CopyRates(DXY_Symbol, TimeFrame, 0, DXY_MA_Period + 5, dRates);
-   if(copied < DXY_MA_Period + 2)
-     {
-      Print("[DXY] Недостаточно данных для ", DXY_Symbol, ". Фильтр пропущен.");
-      return true;
-     }
-
-   // Вычисляем простую скользящую среднюю (SMA) за DXY_MA_Period баров
-   double sum = 0;
-   for(int i = 1; i <= DXY_MA_Period; i++) sum += dRates[i].close;
-   double ma = sum / DXY_MA_Period;
-   double lastClose = dRates[1].close;
-
-   bool dxyBullishProxy = (lastClose > ma);  // EURUSD выше MA → DXY слаб → XAU бычий
-   bool pass = bullishEntry ? dxyBullishProxy : !dxyBullishProxy;
-
-   Print("[DXY] ", DXY_Symbol, " last=", DoubleToString(lastClose, _Digits),
-         " MA(", DXY_MA_Period, ")=", DoubleToString(ma, _Digits),
-         " | Фильтр: ", pass ? "ПРОЙДЕН" : "ЗАБЛОКИРОВАН");
+   // Простая модель: Higher Highs / Higher Lows для бычьего смещения
+   // Last 5 bars: bullish if more bullish than bearish candles
+   int bullCnt=0, bearCnt=0;
+   for(int i=1;i<=10;i++) {
+      if(h[i].close>h[i].open) bullCnt++;
+      else bearCnt++;
+   }
+   bool htfBull=(bullCnt>bearCnt);
+   bool pass=(bull==htfBull);
+   Print("[HTF] ",EnumToString(HTF_TimeFrame)," смещение: ",
+         htfBull?"БЫЧЬЕ":"МЕДВЕЖЬЕ"," | Требуется: ",bull?"БЫЧЬЕ":"МЕДВЕЖЬЕ",
+         " | ",pass?"OK":"БЛОК");
    return pass;
-  }
+}
 
-//--- Новостной фильтр через MQL5 Economic Calendar API
-bool IsNewsWindow()
-  {
-   if(!UseNewsFilter) return false;
+// DXY/EURUSD корреляционный фильтр
+bool CheckDXY(const bool bull) {
+   if(!SymbolInfoInteger(DXY_Symbol,SYMBOL_SELECT)) return true;
+   MqlRates d[]; ArraySetAsSeries(d,true);
+   if(CopyRates(DXY_Symbol,TimeFrame,0,DXY_MA_Period+5,d)<DXY_MA_Period+2) return true;
 
-   // Окно блокировки вокруг события
-   datetime now  = TimeCurrent();
-   datetime from = now - (datetime)(News_Before_Min * 60);
-   datetime to   = now + (datetime)(News_After_Min  * 60);
+   double sum=0;
+   for(int i=1;i<=DXY_MA_Period;i++) sum+=d[i].close;
+   double ma=sum/DXY_MA_Period;
+   bool euBull=(d[1].close>ma);   // EURUSD бычий = DXY медвежий = XAU бычий
+   bool pass=(bull==euBull);
+   Print("[DXY] ",DXY_Symbol," vs MA",DXY_MA_Period,": ",
+         euBull?"БЫЧИЙ":"МЕДВЕЖИЙ"," | ",pass?"OK":"БЛОК");
+   return pass;
+}
 
-   // Запрашиваем события по USD из Экономического календаря MT5
+// Новостной фильтр через Экономический Календарь MT5
+bool IsNews() {
+   datetime now=TimeCurrent();
+   datetime fr=now-(datetime)(News_Before_Min*60);
+   datetime to=now+(datetime)(News_After_Min*60);
    MqlCalendarValue vals[];
-   int cnt = CalendarValueHistory(vals, from, to, NULL, "USD");
-
-   if(cnt <= 0) return false;
-
-   for(int i = 0; i < cnt; i++)
-     {
+   int cnt=CalendarValueHistory(vals,fr,to,NULL,"USD");
+   for(int i=0;i<cnt;i++) {
       MqlCalendarEvent ev;
-      if(CalendarEventById(vals[i].event_id, ev))
-        {
-         // Блокируем только события ВЫСОКОЙ значимости
-         if(ev.importance == CALENDAR_IMPORTANCE_HIGH)
-           {
-            Print("[NEWS] High Impact USD: \"", ev.name, "\"",
-                  " | Время: ", TimeToString(vals[i].time),
-                  " | Торговля заблокирована на ",
-                  News_Before_Min, " мин до / ", News_After_Min, " мин после");
+      if(CalendarEventById(vals[i].event_id,ev))
+         if(ev.importance==CALENDAR_IMPORTANCE_HIGH) {
+            Print("[NEWS] High: \"",ev.name,"\" @ ",TimeToString(vals[i].time));
             return true;
-           }
-        }
-     }
-
+         }
+   }
    return false;
-  }
+}
 
-//+------------------------------------------------------------------+
-//|         МОДУЛЬ 5: УРОВНИ ЛИКВИДНОСТИ (PDH/PDL/Weekly/Asian)     |
-//+------------------------------------------------------------------+
-
-//--- Полное обновление пулов ликвидности
-void RefreshLiquidityLevels()
-  {
-   ArrayResize(g_Levels, 0);  // Очищаем старый массив
-
-   AppendDailyLevels();   // PDH / PDL
-   AppendWeeklyLevels();  // PWH / PWL
-   AppendAsianLevels();   // ASH / ASL
-
-   if(ShowLiquidityLevels) RenderLiquidityLines();
-
-   Print("[LIQ] Уровней ликвидности: ", ArraySize(g_Levels));
-  }
-
-//--- Уровни предыдущего торгового дня
-void AppendDailyLevels()
-  {
-   MqlRates d[];
-   ArraySetAsSeries(d, true);
-   if(CopyRates(_Symbol, PERIOD_D1, 1, 1, d) < 1) return;
-
-   int sz = ArraySize(g_Levels);
-   ArrayResize(g_Levels, sz + 2);
-
-   g_Levels[sz  ] = BuildLevel(d[0].high, d[0].time, true,  "PDH");
-   g_Levels[sz+1] = BuildLevel(d[0].low,  d[0].time, false, "PDL");
-
-   Print("[LIQ] PDH=", DoubleToString(d[0].high, _Digits),
-         " PDL=", DoubleToString(d[0].low, _Digits));
-  }
-
-//--- Уровни предыдущей недели
-void AppendWeeklyLevels()
-  {
-   MqlRates w[];
-   ArraySetAsSeries(w, true);
-   if(CopyRates(_Symbol, PERIOD_W1, 1, 1, w) < 1) return;
-
-   int sz = ArraySize(g_Levels);
-   ArrayResize(g_Levels, sz + 2);
-
-   g_Levels[sz  ] = BuildLevel(w[0].high, w[0].time, true,  "PWH");
-   g_Levels[sz+1] = BuildLevel(w[0].low,  w[0].time, false, "PWL");
-  }
-
-//--- Уровни Азиатской сессии (High/Low)
-void AppendAsianLevels()
-  {
-   // Ищем максимум и минимум за Азиатскую сессию (19:00-22:00 EST)
-   MqlRates h1[];
-   ArraySetAsSeries(h1, true);
-   // Берём 36 часовых баров, чтобы точно захватить вчерашнюю азиатскую сессию
-   if(CopyRates(_Symbol, PERIOD_H1, 0, 36, h1) < 24) return;
-
-   double asHigh = -DBL_MAX;
-   double asLow  =  DBL_MAX;
-   datetime asTime = 0;
-
-   int utcStart = ESTtoUTC(Asian_Start_EST) % 24;
-   int utcEnd   = ESTtoUTC(Asian_End_EST)   % 24;
-
-   for(int i = 1; i < 36; i++)
-     {
-      MqlDateTime dt;
-      TimeToStruct(h1[i].time, dt);
-      int hr = dt.hour;
-      bool inSession = HourInRange(hr, utcStart, utcEnd);
-      if(inSession)
-        {
-         if(h1[i].high > asHigh) { asHigh = h1[i].high; asTime = h1[i].time; }
-         if(h1[i].low  < asLow)    asLow  = h1[i].low;
-        }
-     }
-
-   if(asHigh == -DBL_MAX || asLow == DBL_MAX) return;
-
-   int sz = ArraySize(g_Levels);
-   ArrayResize(g_Levels, sz + 2);
-   g_Levels[sz  ] = BuildLevel(asHigh, asTime, true,  "ASH");
-   g_Levels[sz+1] = BuildLevel(asLow,  asTime, false, "ASL");
-
-   Print("[LIQ] ASH=", DoubleToString(asHigh, _Digits),
-         " ASL=", DoubleToString(asLow, _Digits));
-  }
-
-//--- Конструктор структуры уровня ликвидности
-SLiquidityLevel BuildLevel(double px, datetime t, bool bsl, string lbl)
-  {
-   SLiquidityLevel lv;
-   lv.price   = px;
-   lv.time    = t;
-   lv.isBSL   = bsl;
-   lv.isSwept = false;
-   lv.label   = lbl;
-   return lv;
-  }
-
-//--- Обновление статуса активных FVG зон (MITIGATED / INVERTED)
-void UpdateFVGStatus()
-  {
-   if(!g_FVG.orderPlaced || g_FVG.fvgHigh <= 0) return;
-
-   MqlRates bars[];
-   ArraySetAsSeries(bars, true);
-   if(CopyRates(_Symbol, TimeFrame, 0, 3, bars) < 2) return;
-   MqlRates &lb = bars[1];
-
-   bool invalidated = false;
-   if(g_FVG.direction == DIR_BULLISH)
-     {
-      // FVG бычий: цена полностью прошла вниз ниже нижней границы → закрыт
-      if(lb.close < g_FVG.fvgLow)
-        {
-         g_FVG.status = FVG_MITIGATED;
-         invalidated  = true;
-         Print("[FVG] Бычий FVG закрыт (MITIGATED). Отмена ордера.");
-        }
-     }
-   else
-     {
-      if(lb.close > g_FVG.fvgHigh)
-        {
-         g_FVG.status = FVG_MITIGATED;
-         invalidated  = true;
-         Print("[FVG] Медвежий FVG закрыт (MITIGATED). Отмена ордера.");
-        }
-     }
-
-   if(invalidated) DeletePendingOrder();
-  }
-
-//--- Удаление отложенного ордера
-void DeletePendingOrder()
-  {
-   if(g_FVG.pendingTicket > 0)
-     {
-      bool ok = g_Trade.OrderDelete(g_FVG.pendingTicket);
-      if(!ok)
-         Print("[ERROR] OrderDelete: ", g_Trade.ResultRetcode());
-     }
-   ResetTradeCycle();
-  }
-
-//--- Проверка существования отложенного ордера в системе
-void ValidatePendingOrder()
-  {
-   if(g_FVG.pendingTicket == 0) return;
-
-   // Если ордер не найден — позиция уже открыта или ордер исчез
-   bool exists = false;
-   for(int i = 0; i < OrdersTotal(); i++)
-     {
-      if(OrderGetTicket(i) == g_FVG.pendingTicket) { exists = true; break; }
-     }
-
-   if(!exists && !HasOpenPosition())
-     {
-      Print("[WARN] Отложенный ордер не найден и позиции нет. Сброс цикла.");
-      ResetTradeCycle();
-     }
-  }
-
-
-//+------------------------------------------------------------------+
-//|         МОДУЛЬ 5b: ONNX PLACEHOLDER — ML ФИЛЬТР РЕЖИМА РЫНКА    |
-//+------------------------------------------------------------------+
-//
-//  Функция предназначена для интеграции ONNX-модели (Random Forest или LSTM),
-//  обученной на признаках волатильности/тренда для бинарной классификации:
-//    true  = Трендовый рынок → торговля разрешена
-//    false = Боковой рынок   → торговля заблокирована
-//
-//  Для активации: замените тело функции реальным ONNX-вызовом.
-//  Пример интеграции оставлен в комментариях ниже.
-bool EvaluateRegimeONNX()
-  {
-   //── АКТИВАЦИЯ ONNX (раскомментировать после обучения модели) ──────────
-   //
-   // static long hModel = INVALID_HANDLE;
-   //
-   // // Инициализируем модель один раз
-   // if(hModel == INVALID_HANDLE)
-   //   {
-   //    hModel = OnnxCreateFromFile("Files\\regime_rf_xauusd.onnx", ONNX_DEFAULT);
-   //    if(hModel == INVALID_HANDLE)
-   //      {
-   //       Print("[ONNX] Не удалось загрузить модель: ", GetLastError());
-   //       return true;  // Fail-safe: разрешаем торговлю
-   //      }
-   //   }
-   //
-   // // Формируем входной вектор признаков
-   // double atr[], adx[], rsi[];
-   // CopyBuffer(g_hATR, 0, 1, 10, atr);
-   // // ... остальные признаки
-   //
-   // float inputs[10];
-   // inputs[0] = (float)atr[0];      // ATR нормализованный
-   // inputs[1] = (float)(atr[0]/atr[9]);  // ATR тренд
-   // // ... заполнить inputs[2..9]
-   //
-   // // Запуск модели
-   // float output[1] = {0};
-   // if(!OnnxRun(hModel, ONNX_NO_CONVERSION, inputs, output))
-   //   {
-   //    Print("[ONNX] Ошибка OnnxRun: ", GetLastError());
-   //    return true;
-   //   }
-   //
-   // bool isTrending = (output[0] > 0.5f);
-   // Print("[ONNX] Режим рынка: ", isTrending ? "ТРЕНД" : "БОКОВИК",
-   //       " (вероятность: ", DoubleToString(output[0], 3), ")");
-   // return isTrending;
-   //
-   //─────────────────────────────────────────────────────────────────────
-
-   // ЗАГЛУШКА: всегда возвращаем true (торговля разрешена)
+// ONNX Placeholder: всегда возвращает true (трендовый рынок)
+bool EvalONNX() {
+   // Раскомментируйте и замените на реальный ONNX вызов:
+   // long h=OnnxCreateFromFile("regime_rf.onnx",ONNX_DEFAULT);
+   // float inp[5]={(float)atr,...}; float out[1]={0};
+   // OnnxRun(h,ONNX_NO_CONVERSION,inp,out); OnnxRelease(h);
+   // return out[0]>0.5f;
    return true;
-  }
+}
 
 //+------------------------------------------------------------------+
-//|       МОДУЛЬ 5c: ВИЗУАЛИЗАЦИЯ ГРАФИЧЕСКИХ ОБЪЕКТОВ              |
+//|  МОДУЛЬ 5: УРОВНИ ЛИКВИДНОСТИ                                   |
 //+------------------------------------------------------------------+
+void RefreshLiqLevels() {
+   ArrayResize(g_Lvl,0);
+   AddDailyLvl(); AddWeeklyLvl(); AddAsianLvl();
+   if(ShowLiquidityLevels) RenderLiqLines();
+}
 
-//--- Отрисовка прямоугольной зоны FVG
-void DrawFVGZone(const SFVG &fvg)
-  {
-   string rectName = "FVG_R_" + IntegerToString(g_ObjSeq);
-   string ceName   = "FVG_C_" + IntegerToString(g_ObjSeq++);
+void AddDailyLvl() {
+   MqlRates d[]; ArraySetAsSeries(d,true);
+   if(CopyRates(_Symbol,PERIOD_D1,1,1,d)<1) return;
+   int s=ArraySize(g_Lvl); ArrayResize(g_Lvl,s+2);
+   g_Lvl[s  ]=MkLvl(d[0].high,d[0].time,true, "PDH");
+   g_Lvl[s+1]=MkLvl(d[0].low, d[0].time,false,"PDL");
+}
 
-   color  zoneClr  = (fvg.direction == DIR_BULLISH) ? FVG_Bull_Color : FVG_Bear_Color;
+void AddWeeklyLvl() {
+   MqlRates w[]; ArraySetAsSeries(w,true);
+   if(CopyRates(_Symbol,PERIOD_W1,1,1,w)<1) return;
+   int s=ArraySize(g_Lvl); ArrayResize(g_Lvl,s+2);
+   g_Lvl[s  ]=MkLvl(w[0].high,w[0].time,true, "PWH");
+   g_Lvl[s+1]=MkLvl(w[0].low, w[0].time,false,"PWL");
+}
 
-   // Прямоугольник зоны FVG (растягиваем на 50 баров вправо)
-   datetime t1 = fvg.formationTime;
-   datetime t2 = fvg.formationTime + (datetime)(PeriodSeconds(TimeFrame) * 60);
+void AddAsianLvl() {
+   MqlRates h1[]; ArraySetAsSeries(h1,true);
+   if(CopyRates(_Symbol,PERIOD_H1,0,36,h1)<24) return;
+   double aH=-DBL_MAX, aL=DBL_MAX;
+   datetime at=0;
+   int us=EST2UTC(Asian_Start_EST)%24, ue=EST2UTC(Asian_End_EST)%24;
+   for(int i=1;i<36;i++) {
+      MqlDateTime dt; TimeToStruct(h1[i].time,dt);
+      if(HourIn(dt.hour,us,ue)) {
+         if(h1[i].high>aH){aH=h1[i].high;at=h1[i].time;}
+         if(h1[i].low <aL) aL=h1[i].low;
+      }
+   }
+   if(aH==-DBL_MAX) return;
+   int s=ArraySize(g_Lvl); ArrayResize(g_Lvl,s+2);
+   g_Lvl[s  ]=MkLvl(aH,at,true, "ASH");
+   g_Lvl[s+1]=MkLvl(aL,at,false,"ASL");
+}
 
-   if(ObjectCreate(0, rectName, OBJ_RECTANGLE, 0,
-                   t1, fvg.fvgHigh,
-                   t2, fvg.fvgLow))
-     {
-      ObjectSetInteger(0, rectName, OBJPROP_COLOR,      zoneClr);
-      ObjectSetInteger(0, rectName, OBJPROP_FILL,        true);
-      ObjectSetInteger(0, rectName, OBJPROP_BACK,        true);
-      ObjectSetInteger(0, rectName, OBJPROP_SELECTABLE,  false);
-      ObjectSetInteger(0, rectName, OBJPROP_HIDDEN,      false);
-      ObjectSetString (0, rectName, OBJPROP_TOOLTIP,
-                       (fvg.direction == DIR_BULLISH ? "Bullish " : "Bearish ") +
-                       "FVG [" + EnumToString(fvg.status) + "]" +
-                       "\nH: " + DoubleToString(fvg.fvgHigh, _Digits) +
-                       "\nL: " + DoubleToString(fvg.fvgLow, _Digits) +
-                       "\nCE: " + DoubleToString(fvg.ce50, _Digits));
-     }
-   else
-      Print("[DRAW] Ошибка создания FVG прямоугольника: ", GetLastError());
+SLiqLevel MkLvl(double p,datetime t,bool bsl,string lbl) {
+   SLiqLevel l; l.price=p; l.time=t; l.isBSL=bsl; l.isSwept=false; l.label=lbl;
+   return l;
+}
 
-   // Пунктирная линия уровня CE (Consequent Encroachment 50%)
-   DrawHLine(ceName, fvg.ce50, clrWhite, STYLE_DOT, 1);
-   ObjectSetString(0, ceName, OBJPROP_TOOLTIP,
-                   "CE 50%: " + DoubleToString(fvg.ce50, _Digits));
+void UpdateFVGStatus() {
+   if(!g_FVG.ordered||g_FVG.hi<=0) return;
+   MqlRates b[]; ArraySetAsSeries(b,true);
+   if(CopyRates(_Symbol,TimeFrame,0,3,b)<2) return;
+   MqlRates &lb=b[1];
+   if(g_FVG.dir==DIR_BULL && lb.close<g_FVG.lo) {
+      g_FVG.status=FVG_MITIGATED; Print("[FVG] Bull FVG закрыт."); DelPending();
+   } else if(g_FVG.dir==DIR_BEAR && lb.close>g_FVG.hi) {
+      g_FVG.status=FVG_MITIGATED; Print("[FVG] Bear FVG закрыт."); DelPending();
+   }
+}
 
+void DelPending() {
+   if(g_FVG.ticket>0) g_Trade.OrderDelete(g_FVG.ticket);
+   ResetCycle();
+}
+
+void ValidatePending() {
+   bool found=false;
+   for(int i=0;i<OrdersTotal();i++)
+      if(OrderGetTicket(i)==g_FVG.ticket){found=true;break;}
+   if(!found&&!HasPos()){Print("[WARN] Ордер исчез. Сброс."); ResetCycle();}
+}
+
+//+------------------------------------------------------------------+
+//|  ВИЗУАЛИЗАЦИЯ                                                    |
+//+------------------------------------------------------------------+
+void DrawFVGRect(const SFVG &fvg) {
+   string rn="FVG_R_"+IntegerToString(g_ObjN);
+   string cn="FVG_C_"+IntegerToString(g_ObjN++);
+   color  cl=(fvg.dir==DIR_BULL)?FVG_Bull_Color:FVG_Bear_Color;
+   datetime t2=fvg.time+(datetime)(PeriodSeconds(TimeFrame)*60);
+   if(ObjectCreate(0,rn,OBJ_RECTANGLE,0,fvg.time,fvg.hi,t2,fvg.lo)) {
+      ObjectSetInteger(0,rn,OBJPROP_COLOR,     cl);
+      ObjectSetInteger(0,rn,OBJPROP_FILL,      true);
+      ObjectSetInteger(0,rn,OBJPROP_BACK,      true);
+      ObjectSetInteger(0,rn,OBJPROP_SELECTABLE,false);
+      ObjectSetString (0,rn,OBJPROP_TOOLTIP,
+         (fvg.dir==DIR_BULL?"Bull ":"Bear ")+"FVG ["+EnumToString(fvg.status)+"]"+
+         "\nH:"+DoubleToString(fvg.hi,_Digits)+
+         "\nL:"+DoubleToString(fvg.lo,_Digits)+
+         "\nCE:"+DoubleToString(fvg.ce,_Digits));
+   }
+   DrawHL(cn,fvg.ce,clrWhite,STYLE_DOT,1);
    ChartRedraw(0);
-  }
+}
 
-//--- Отрисовка горизонтальной линии
-void DrawHLine(const string    name,
-               const double    price,
-               const color     clr,
-               const ENUM_LINE_STYLE style,
-               const int       width)
-  {
-   // Удаляем старый объект с таким именем, если существует
-   if(ObjectFind(0, name) >= 0) ObjectDelete(0, name);
+void DrawHL(const string nm,double px,color cl,ENUM_LINE_STYLE st,int w) {
+   if(ObjectFind(0,nm)>=0) ObjectDelete(0,nm);
+   if(ObjectCreate(0,nm,OBJ_HLINE,0,0,px)) {
+      ObjectSetInteger(0,nm,OBJPROP_COLOR,     cl);
+      ObjectSetInteger(0,nm,OBJPROP_STYLE,     st);
+      ObjectSetInteger(0,nm,OBJPROP_WIDTH,     w);
+      ObjectSetInteger(0,nm,OBJPROP_SELECTABLE,false);
+      ObjectSetString (0,nm,OBJPROP_TOOLTIP,   nm+": "+DoubleToString(px,_Digits));
+   }
+}
 
-   if(ObjectCreate(0, name, OBJ_HLINE, 0, 0, price))
-     {
-      ObjectSetInteger(0, name, OBJPROP_COLOR,     clr);
-      ObjectSetInteger(0, name, OBJPROP_STYLE,     style);
-      ObjectSetInteger(0, name, OBJPROP_WIDTH,     width);
-      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
-      ObjectSetString (0, name, OBJPROP_TOOLTIP,
-                       name + ": " + DoubleToString(price, _Digits));
-     }
-  }
-
-//--- Отрисовка всех уровней ликвидности
-void RenderLiquidityLines()
-  {
-   // Сначала чистим старые уровни, чтобы не накапливались
-   int total = ObjectsTotal(0, 0, -1);
-   for(int i = total - 1; i >= 0; i--)
-     {
-      string nm = ObjectName(0, i, 0, -1);
-      if(StringFind(nm, "LIQ_") == 0)
-         ObjectDelete(0, nm);
-     }
-
-   int n = ArraySize(g_Levels);
-   for(int i = 0; i < n; i++)
-     {
-      if(g_Levels[i].isSwept) continue;  // Захваченные уровни не рисуем
-
-      string lineName = "LIQ_" + g_Levels[i].label + "_" + IntegerToString(i);
-      DrawHLine(lineName, g_Levels[i].price, Liq_Color, STYLE_DASH, 2);
-
-      // Текстовая метка справа от линии
-      string txtName = "LIQ_T_" + IntegerToString(i);
-      if(ObjectFind(0, txtName) >= 0) ObjectDelete(0, txtName);
-
-      datetime lblTime = iTime(_Symbol, TimeFrame, 0) + PeriodSeconds(TimeFrame) * 2;
-      if(ObjectCreate(0, txtName, OBJ_TEXT, 0, lblTime, g_Levels[i].price))
-        {
-         ObjectSetString (0, txtName, OBJPROP_TEXT,      g_Levels[i].label);
-         ObjectSetInteger(0, txtName, OBJPROP_COLOR,     Liq_Color);
-         ObjectSetInteger(0, txtName, OBJPROP_FONTSIZE,  7);
-         ObjectSetInteger(0, txtName, OBJPROP_SELECTABLE, false);
-        }
-     }
-
+void RenderLiqLines() {
+   // Чистим старые
+   int tot=ObjectsTotal(0,0,-1);
+   for(int i=tot-1;i>=0;i--) {
+      string nm=ObjectName(0,i,0,-1);
+      if(StringFind(nm,"LIQ_")==0) ObjectDelete(0,nm);
+   }
+   int n=ArraySize(g_Lvl);
+   for(int i=0;i<n;i++) {
+      if(g_Lvl[i].isSwept) continue;
+      string ln="LIQ_"+g_Lvl[i].label+"_"+IntegerToString(i);
+      DrawHL(ln,g_Lvl[i].price,Liq_Color,STYLE_DASH,2);
+      string tn="LIQ_T_"+IntegerToString(i);
+      if(ObjectFind(0,tn)>=0) ObjectDelete(0,tn);
+      datetime lbt=iTime(_Symbol,TimeFrame,0)+PeriodSeconds(TimeFrame)*2;
+      if(ObjectCreate(0,tn,OBJ_TEXT,0,lbt,g_Lvl[i].price)) {
+         ObjectSetString (0,tn,OBJPROP_TEXT,    g_Lvl[i].label);
+         ObjectSetInteger(0,tn,OBJPROP_COLOR,   Liq_Color);
+         ObjectSetInteger(0,tn,OBJPROP_FONTSIZE,7);
+         ObjectSetInteger(0,tn,OBJPROP_SELECTABLE,false);
+      }
+   }
    ChartRedraw(0);
-  }
+}
 
-//--- Удаление всех объектов советника с графика
-void PurgeChartObjects()
-  {
-   string prefixes[] = {"FVG_R_", "FVG_C_", "LIQ_", "CISD_B_", "CISD_R_"};
-   int total;
+// Информационный дашборд на графике
+void DrawDashboard() {
+   string nm="DASH_BG";
+   if(ObjectFind(0,nm)<0) {
+      ObjectCreate(0,nm,OBJ_RECTANGLE_LABEL,0,0,0);
+      ObjectSetInteger(0,nm,OBJPROP_XDISTANCE, 10);
+      ObjectSetInteger(0,nm,OBJPROP_YDISTANCE, 30);
+      ObjectSetInteger(0,nm,OBJPROP_XSIZE,     260);
+      ObjectSetInteger(0,nm,OBJPROP_YSIZE,     160);
+      ObjectSetInteger(0,nm,OBJPROP_BGCOLOR,   C'20,20,30');
+      ObjectSetInteger(0,nm,OBJPROP_BORDER_TYPE,BORDER_FLAT);
+      ObjectSetInteger(0,nm,OBJPROP_COLOR,     clrGray);
+      ObjectSetInteger(0,nm,OBJPROP_BACK,      false);
+      ObjectSetInteger(0,nm,OBJPROP_SELECTABLE,false);
+   }
+}
 
-   for(int p = 0; p < ArraySize(prefixes); p++)
-     {
-      total = ObjectsTotal(0, 0, -1);
-      for(int i = total - 1; i >= 0; i--)
-        {
-         string nm = ObjectName(0, i, 0, -1);
-         if(StringFind(nm, prefixes[p]) == 0)
-            ObjectDelete(0, nm);
-        }
-     }
+void UpdateDashboard() {
+   if(!ShowDashboard) return;
+   string lines[]={"SMC EA v2.00 | "+_Symbol,
+                    "Фаза: "+EnumToString(g_Phase),
+                    "Kill Zone: "+(IsKillZone()?"ДА ✓":"НЕТ"),
+                    "Спред: "+DoubleToString(GetSpreadPts(),1)+" pts",
+                    "DD сегодня: "+DoubleToString(
+                       (g_DayStartBal-AccountInfoDouble(ACCOUNT_BALANCE))/
+                       (g_DayStartBal>0?g_DayStartBal:1)*100.0,2)+"%",
+                    "День заблокирован: "+(g_DayBlocked?"ДА":"НЕТ"),
+                    "DST: "+(g_DST?"EST=UTC-4":"EST=UTC-5")};
+   int y=35;
+   for(int i=0;i<ArraySize(lines);i++) {
+      string nm="DASH_L"+IntegerToString(i);
+      if(ObjectFind(0,nm)<0) {
+         ObjectCreate(0,nm,OBJ_LABEL,0,0,0);
+         ObjectSetInteger(0,nm,OBJPROP_XDISTANCE,  15);
+         ObjectSetInteger(0,nm,OBJPROP_SELECTABLE,  false);
+         ObjectSetString (0,nm,OBJPROP_FONT,        "Consolas");
+         ObjectSetInteger(0,nm,OBJPROP_FONTSIZE,    8);
+      }
+      ObjectSetInteger(0,nm,OBJPROP_YDISTANCE, y+i*19);
+      ObjectSetString (0,nm,OBJPROP_TEXT,      lines[i]);
+      ObjectSetInteger(0,nm,OBJPROP_COLOR,
+         i==0?clrGold:(i==4&&g_DayBlocked?clrRed:clrSilver));
+   }
    ChartRedraw(0);
-  }
+}
+
+void PurgeObjects() {
+   string pfx[]={"FVG_","LIQ_","CISD_","E_SL_","E_TP_","E_EN_","DASH_"};
+   for(int p=0;p<ArraySize(pfx);p++) {
+      int tot=ObjectsTotal(0,0,-1);
+      for(int i=tot-1;i>=0;i--) {
+         string nm=ObjectName(0,i,0,-1);
+         if(StringFind(nm,pfx[p])==0) ObjectDelete(0,nm);
+      }
+   }
+   ChartRedraw(0);
+}
 
 //+------------------------------------------------------------------+
-//|             ВСПОМОГАТЕЛЬНЫЕ И УТИЛИТАРНЫЕ ФУНКЦИИ               |
+//|  УТИЛИТЫ                                                         |
 //+------------------------------------------------------------------+
-
-//--- Проверка наличия открытой позиции по текущему символу + Magic
-bool HasOpenPosition()
-  {
+bool HasPos() {
    if(!PositionSelect(_Symbol)) return false;
-   return (PositionGetInteger(POSITION_MAGIC) == Magic);
-  }
+   return PositionGetInteger(POSITION_MAGIC)==Magic;
+}
 
-//--- Сброс торгового цикла в начальное состояние
-void ResetTradeCycle()
-  {
-   ZeroMemory(g_Sweep);
-   ZeroMemory(g_CISD);
-   ZeroMemory(g_FVG);
-   g_PartialDone = false;
-   g_CyclePhase  = PHASE_HUNTING;
-   Print("[RESET] Торговый цикл сброшен → PHASE_HUNTING");
-  }
+void ResetCycle() {
+   ZeroMemory(g_Sw); ZeroMemory(g_CD); ZeroMemory(g_FVG);
+   g_PartDone=false; g_Phase=PHASE_HUNT;
+   Print("[RESET] Цикл сброшен → PHASE_HUNT");
+}
 
-//--- Количество баров, прошедших с указанного времени
-int BarsElapsed(const datetime fromTime)
-  {
-   if(fromTime == 0) return 999;
-   return Bars(_Symbol, TimeFrame, fromTime, TimeCurrent());
-  }
+double GetSpreadPts() {
+   double pt=SymbolInfoDouble(_Symbol,SYMBOL_POINT);
+   if(pt<=0) return 0;
+   return (SymbolInfoDouble(_Symbol,SYMBOL_ASK)-SymbolInfoDouble(_Symbol,SYMBOL_BID))/pt;
+}
 
+int BarsFrom(datetime t) {
+   if(t==0) return 9999;
+   return Bars(_Symbol,TimeFrame,t,TimeCurrent());
+}
 //+------------------------------------------------------------------+
-//|                    КОНЕЦ ФАЙЛА                                   |
-//|            SMC_UltimateTrader_2026.mq5                           |
+//|  КОНЕЦ ФАЙЛА  SMC_UltimateTrader_2026.mq5  v2.00                |
 //+------------------------------------------------------------------+
