@@ -33,6 +33,11 @@
 //  │  └─ Economic Calendar API (блокировка вблизи USD новостей)       │
 //  └──────────────────────────────────────────────────────────────────┘
 //
+//  ⚡ КЛЮЧЕВЫЕ УЛУЧШЕНИЯ v3.01 vs v3.00:
+//     • Fix: PHASE_MANAGE дедлок — авто-сброс когда позиция закрыта по SL/TP
+//     • Fix: HTF фильтр — равный счёт (1:1) → пропуск, не блокировка
+//     • Fix: ACCOUNT_FREEMARGIN → ACCOUNT_MARGIN_FREE (устранено предупреждение)
+//
 //  ⚡ КЛЮЧЕВЫЕ УЛУЧШЕНИЯ v3.00 vs v2.00:
 //     • Fix: g_FVG присваивается ПОСЛЕ PlaceOrder (устранены двойные ордера)
 //     • Fix: Валидация цены входа vs SYMBOL_TRADE_STOPS_LEVEL (устранён err 10015)
@@ -51,10 +56,10 @@
 //     • On-chart информационная панель (Dashboard)
 //     • Оптимизирован для MT5 Strategy Tester (multi-thread safe)
 //
-#property copyright   "SMC Ultimate Trading System 2026 v3.00"
+#property copyright   "SMC Ultimate Trading System 2026 v3.01"
 #property link        "https://github.com/allai-77/allai-77"
-#property version     "3.00"
-#property description "SMC/ICT EA | XAU/USD | Sweep→CISD→FVG | v3.00"
+#property version     "3.01"
+#property description "SMC/ICT EA | XAU/USD | Sweep→CISD→FVG | v3.01"
 #property strict
 
 //+------------------------------------------------------------------+
@@ -206,7 +211,7 @@ SSessionStats g_StatNY, g_StatLDN;
 //+------------------------------------------------------------------+
 int OnInit() {
    Print("╔══════════════════════════════════════════╗");
-   Print("║  SMC Ultimate EA v2.00  |  XAU/USD       ║");
+   Print("║  SMC Ultimate EA v3.01  |  XAU/USD       ║");
    Print("╚══════════════════════════════════════════╝");
 
    if(!g_Sym.Name(_Symbol)) { Print("[FATAL] Символ недоступен"); return INIT_FAILED; }
@@ -249,7 +254,7 @@ void OnDeinit(const int r) {
    if(g_hATR_HTF != INVALID_HANDLE) IndicatorRelease(g_hATR_HTF);
    if(g_hATR_DXY != INVALID_HANDLE) IndicatorRelease(g_hATR_DXY);
    PurgeObjects();
-   Print("SMC v2.00 | Деинициализация | reason=", r);
+   Print("SMC v3.01 | Деинициализация | reason=", r);
 }
 
 //+------------------------------------------------------------------+
@@ -300,6 +305,14 @@ void OnTradeTransaction(const MqlTradeTransaction &tr,
 //|  МОДУЛЬ 1: СИГНАЛЬНЫЙ ПАЙПЛАЙН                                  |
 //+------------------------------------------------------------------+
 void RunPipeline() {
+   // ── АВТО-СБРОС: позиция закрылась по SL/TP, но фаза не сброшена ──
+   // (Это случается потому что OnTradeTransaction не ловит закрытие рыночным ордером)
+   if(g_Phase == PHASE_MANAGE && !HasPos() && !g_FVG.ordered) {
+      Print("[MANAGE] Позиция закрыта (SL/TP). Авто-сброс → PHASE_HUNT");
+      ResetCycle();
+      return;
+   }
+
    // Глобальные фильтры
    if(MaxSpreadPoints > 0 && GetSpreadPts() > MaxSpreadPoints) {
       Print("[SPREAD] Спред ", DoubleToString(GetSpreadPts(),1), " > макс. Пропуск.");
@@ -650,7 +663,7 @@ bool PlaceOrder(SFVG &fvg, const double sl, const double lot) {
    // ── ВАЛИДАЦИЯ 4: Достаточно ли маржи? ──
    double marginReq = 0;
    if(OrderCalcMargin(ot, _Symbol, lot, entry, marginReq)) {
-      double marginFree = AccountInfoDouble(ACCOUNT_FREEMARGIN);
+      double marginFree = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
       if(marginFree < marginReq * 1.1) {
          Print("[ORD] Маржа: свободно=$", DoubleToString(marginFree,2),
                " требуется=$", DoubleToString(marginReq,2), ". Пропуск.");
@@ -888,14 +901,18 @@ bool CheckHTFBias(const bool bull) {
       return true;
    }
 
-   // ── Определяем смещение: ──
-   // Бычье: последний свинговый хай > предыдущего (HH) ИЛИ последний свинговый лой > предыдущего (HL)
-   // Медвежье: LH + LL
+   // ── Определяем смещение через HH/HL (бычье) или LH/LL (медвежье) ──
    int bullScore = 0, bearScore = 0;
    if(hCnt>=2) { if(swH[0]>swH[1]) bullScore++; else bearScore++; }
    if(lCnt>=2) { if(swL[0]>swL[1]) bullScore++; else bearScore++; }
 
-   bool htfBull = (bullScore >= bearScore);  // равно — считаем бычьим (нейтральный = пропустить)
+   // Нейтральный рынок (счёт равный) → фильтр пропускаем, не блокируем
+   if(bullScore == bearScore) {
+      Print("[HTF] Нейтральный (", bullScore, ":", bearScore, "). Фильтр пропущен.");
+      return true;
+   }
+
+   bool htfBull = (bullScore > bearScore);
    bool pass    = (bull == htfBull);
 
    Print("[HTF] ", EnumToString(HTF_TimeFrame),
@@ -1172,5 +1189,5 @@ int BarsFrom(datetime t) {
    return Bars(_Symbol,TimeFrame,t,TimeCurrent());
 }
 //+------------------------------------------------------------------+
-//|  КОНЕЦ ФАЙЛА  SMC_UltimateTrader_2026.mq5  v3.00                |
+//|  КОНЕЦ ФАЙЛА  SMC_UltimateTrader_2026.mq5  v3.01                |
 //+------------------------------------------------------------------+
