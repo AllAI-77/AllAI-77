@@ -362,7 +362,7 @@ SSweep DetectSweep() {
    SSweep r; ZeroMemory(r);
    MqlRates b[]; ArraySetAsSeries(b,true);
    if(CopyRates(_Symbol,TimeFrame,0,4,b)<3) return r;
-   MqlRates &c=b[1];                         // последний закрытый бар
+   // используем b[1] напрямую
 
    int n=ArraySize(g_Lvl);
    for(int i=0;i<n;i++) {
@@ -370,19 +370,19 @@ SSweep DetectSweep() {
       double lv=g_Lvl[i].price;
 
       // BSL захват: тень вверх пробила, тело закрылось ниже → медвежий
-      if(g_Lvl[i].isBSL && c.high>lv && c.close<lv) {
+      if(g_Lvl[i].isBSL && b[1].high>lv && b[1].close<lv) {
          g_Lvl[i].isSwept=true;
          r.detected=true; r.isBull=false;
-         r.hi=c.high; r.lo=c.low; r.time=c.time; r.shift=1;
+         r.hi=b[1].high; r.lo=b[1].low; r.time=b[1].time; r.shift=1;
          Print("[SW] BSL swept | lvl:",DoubleToString(lv,_Digits),
                " (", g_Lvl[i].label, ")");
          return r;
       }
       // SSL захват: тень вниз пробила, тело закрылось выше → бычий
-      if(!g_Lvl[i].isBSL && c.low<lv && c.close>lv) {
+      if(!g_Lvl[i].isBSL && b[1].low<lv && b[1].close>lv) {
          g_Lvl[i].isSwept=true;
          r.detected=true; r.isBull=true;
-         r.hi=c.high; r.lo=c.low; r.time=c.time; r.shift=1;
+         r.hi=b[1].high; r.lo=b[1].low; r.time=b[1].time; r.shift=1;
          Print("[SW] SSL swept | lvl:",DoubleToString(lv,_Digits),
                " (", g_Lvl[i].label, ")");
          return r;
@@ -398,13 +398,13 @@ SCISD DetectCISD(const bool bull) {
    SCISD r; ZeroMemory(r);
    MqlRates b[]; ArraySetAsSeries(b,true);
    if(CopyRates(_Symbol,TimeFrame,0,40,b)<10) return r;
-   MqlRates &conf=b[1];
+   // используем b[1] напрямую
 
    // Фильтр качества тела свечи подтверждения
    if(CISD_MinBodyPct>0) {
       double atr[]; ArraySetAsSeries(atr,true);
       if(CopyBuffer(g_hATR,0,1,1,atr)>=1) {
-         double body=MathAbs(conf.close-conf.open);
+         double body=MathAbs(b[1].close-b[1].open);
          if(atr[0]>0 && body/atr[0]*100.0 < CISD_MinBodyPct) return r;
       }
    }
@@ -423,12 +423,12 @@ SCISD DetectCISD(const bool bull) {
       }
       if(blk<0) return r;
       double bOpen=b[blk].open;
-      if(conf.close>bOpen && conf.close>conf.open) {
+      if(b[1].close>bOpen && b[1].close>b[1].open) {
          r.detected=true; r.isBull=true;
          r.blockOpen=bOpen; r.blockTime=b[blk].time;
-         r.confirmTime=conf.time;
+         r.confirmTime=b[1].time;
          if(ShowCISDLevels)
-            DrawHL("CISD_B_"+TimeToString(conf.time,TIME_DATE|TIME_MINUTES),
+            DrawHL("CISD_B_"+TimeToString(b[1].time,TIME_DATE|TIME_MINUTES),
                    bOpen,CISD_BullColor,STYLE_DASHDOTDOT,2);
       }
    } else {
@@ -443,12 +443,12 @@ SCISD DetectCISD(const bool bull) {
       }
       if(blk<0) return r;
       double bOpen=b[blk].open;
-      if(conf.close<bOpen && conf.close<conf.open) {
+      if(b[1].close<bOpen && b[1].close<b[1].open) {
          r.detected=true; r.isBull=false;
          r.blockOpen=bOpen; r.blockTime=b[blk].time;
-         r.confirmTime=conf.time;
+         r.confirmTime=b[1].time;
          if(ShowCISDLevels)
-            DrawHL("CISD_R_"+TimeToString(conf.time,TIME_DATE|TIME_MINUTES),
+            DrawHL("CISD_R_"+TimeToString(b[1].time,TIME_DATE|TIME_MINUTES),
                    bOpen,CISD_BearColor,STYLE_DASHDOTDOT,2);
       }
    }
@@ -466,18 +466,18 @@ SFVG DetectFVG(const bool bull) {
    double minSz=MinFVG_Points*pt;
 
    for(int i=3;i<18;i++) {
-      MqlRates &L=b[i+1], &M=b[i], &R=b[i-1];
+      // используем b[i+1], b[i], b[i-1] напрямую
       if(bull) {
-         if(R.low>L.high && R.low-L.high>=minSz) {
-            r.hi=R.low; r.lo=L.high; r.ce=(r.hi+r.lo)/2.0;
-            r.time=M.time; r.dir=DIR_BULL; r.status=FVG_ACTIVE;
+         if(b[i-1].low>b[i+1].high && b[i-1].low-b[i+1].high>=minSz) {
+            r.hi=b[i-1].low; r.lo=b[i+1].high; r.ce=(r.hi+r.lo)/2.0;
+            r.time=b[i].time; r.dir=DIR_BULL; r.status=FVG_ACTIVE;
             r.status=FVGInverted(r,b,i-2);
             return r;
          }
       } else {
-         if(R.high<L.low && L.low-R.high>=minSz) {
-            r.hi=L.low; r.lo=R.high; r.ce=(r.hi+r.lo)/2.0;
-            r.time=M.time; r.dir=DIR_BEAR; r.status=FVG_ACTIVE;
+         if(b[i-1].high<b[i+1].low && b[i+1].low-b[i-1].high>=minSz) {
+            r.hi=b[i+1].low; r.lo=b[i-1].high; r.ce=(r.hi+r.lo)/2.0;
+            r.time=b[i].time; r.dir=DIR_BEAR; r.status=FVG_ACTIVE;
             r.status=FVGInverted(r,b,i-2);
             return r;
          }
@@ -896,10 +896,10 @@ void UpdateFVGStatus() {
    if(!g_FVG.ordered||g_FVG.hi<=0) return;
    MqlRates b[]; ArraySetAsSeries(b,true);
    if(CopyRates(_Symbol,TimeFrame,0,3,b)<2) return;
-   MqlRates &lb=b[1];
-   if(g_FVG.dir==DIR_BULL && lb.close<g_FVG.lo) {
+   // используем b[1] напрямую
+   if(g_FVG.dir==DIR_BULL && b[1].close<g_FVG.lo) {
       g_FVG.status=FVG_MITIGATED; Print("[FVG] Bull FVG закрыт."); DelPending();
-   } else if(g_FVG.dir==DIR_BEAR && lb.close>g_FVG.hi) {
+   } else if(g_FVG.dir==DIR_BEAR && b[1].close>g_FVG.hi) {
       g_FVG.status=FVG_MITIGATED; Print("[FVG] Bear FVG закрыт."); DelPending();
    }
 }
